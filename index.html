@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Biodanza Messplayer 3</title>
+<title>Biodanza Messplayer 4</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 680px; margin: 1.5rem auto; padding: 0 1rem; color: #222; background: #fafaf7; line-height: 1.5; }
   h1 { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.2rem; }
@@ -37,10 +37,17 @@
   #blackout { display: none; position: fixed; inset: 0; background: #000; z-index: 9999; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   #unlockq { display: none; position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); background: #111; border: 1px solid #333; border-radius: 12px; padding: 1rem 1.2rem; text-align: center; color: #999; font-size: 1rem; }
   #unlockq button { background: #222; color: #ccc; border-color: #444; margin: 0.6rem 0.4rem 0; min-width: 6rem; }
+  #bvis { display: none; text-align: center; padding: 0.6rem 0; }
+  #bcirc { width: 160px; height: 160px; border-radius: 50%; margin: 0 auto; background: #2d6a4f; transform: scale(0.45); }
+  #btxt { font-size: 1.4rem; margin-top: 0.3rem; color: #2d6a4f; font-variant-numeric: tabular-nums; }
+  #blackout #bvis { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+  #blackout #bcirc { background: #1d4a38; }
+  #blackout #btxt { color: #6f9c88; }
+  #unlockq { z-index: 2; }
 </style>
 </head>
 <body>
-<h1>Biodanza Messplayer 3</h1>
+<h1>Biodanza Messplayer 4</h1>
 <div class="hint">Herz, Atmung, Bewegung, Klangumgebung und Musik mit derselben Uhr. Gurt, Mikrofon und Musik laufen unabhängig voneinander.</div>
 
 <div id="bar"><span id="wl">Bildschirm: nicht nötig</span> · <span id="dur">keine Aufzeichnung</span> · <span id="mem">Speicher …</span></div>
@@ -103,6 +110,27 @@
   <div id="slstatus" class="stat"></div>
 </fieldset>
 
+<fieldset>
+  <legend>Atemhilfe</legend>
+  <div class="hint">Zeiten in Sekunden. Eine Pause auf 0 entfällt samt ihrem Ton. Optik und Töne schalten sich getrennt ein und aus.</div>
+  <label>Einatmen: <input type="number" id="b0" min="0.5" max="60" step="0.5" value="4"></label>
+  <label>Pause: <input type="number" id="b1" min="0" max="60" step="0.5" value="0"></label>
+  <label>Ausatmen: <input type="number" id="b2" min="0.5" max="60" step="0.5" value="6"></label>
+  <label>Pause 2: <input type="number" id="b3" min="0" max="60" step="0.5" value="0"></label>
+  <button class="tog" id="bopt">Optik: aus</button><button class="tog" id="bton">Töne: aus</button>
+  <label>Lautstärke Töne: <input type="range" id="bvol" min="0" max="100" value="60"></label>
+  <div class="hint">Einatmen: zwei Töne aufwärts. Pause: ein hoher leiser Ton. Ausatmen: zwei Töne abwärts. Pause 2: ein tiefer leiser Ton. Die Optik erscheint auch in der Schwarzsperre.</div>
+  <div id="bstatus" class="stat"></div>
+  <div id="bhome"><div id="bvis"><div id="bcirc"></div><div id="btxt"></div></div></div>
+</fieldset>
+
+<fieldset>
+  <legend>Raumtemperatur (ThermoPro TP357)</legend>
+  <div class="hint">Am Ende der Messung abholen. Das Thermometer speichert einen Wert pro Minute für die letzten 24 Stunden. Nach dem ersten Abholen geschieht es beim Beenden der Gurtaufzeichnung von selbst.</div>
+  <button class="main" id="tpget">Temperatur abholen</button>
+  <div id="tpstatus" class="stat"></div>
+</fieldset>
+
 <button class="main" id="start" disabled>Musik starten</button>
 <button id="stop" disabled>Musik stoppen</button>
 <button class="main" id="resume" style="display:none">Weiter</button>
@@ -146,7 +174,7 @@
 <script>
 const PIECES = [
   { key: "raiz",  name: "Raíz Negra",           match: /raiz|raíz/i },
-  { key: "tamb",  name: "Tamborins (3×)",       match: /tamb/i, reps: 3 },
+  { key: "tamb",  name: "Tamborins (3×)", base: "Tamborins", match: /tamb/i, reps: 3 },
   { key: "copp",  name: "Coppélia",             match: /copp/i },
   { key: "lotus", name: "Blue Lotus",           match: /lotus/i },
   { key: "cav",   name: "Cavalleria Rusticana", match: /cavall/i }
@@ -165,7 +193,7 @@ const num = (x, d = 1) => (x === null || x === undefined || !Number.isFinite(x))
 const hms = s => `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(Math.floor(s % 60))}`;
 
 /* ================= Speicher (IndexedDB, nur anhängen) ================= */
-let db = null, queue = [], counts = { log: 0, beat: 0, acc: 0, ecg: 0, snd: 0, evt: 0 };
+let db = null, queue = [], counts = { log: 0, beat: 0, acc: 0, ecg: 0, snd: 0, evt: 0, sync: 0, atem: 0, temp: 0 };
 function openDb() {
   return new Promise((res, rej) => {
     const r = indexedDB.open("messplayer2", 1);
@@ -216,7 +244,7 @@ function addEntry(r) { if (!r.session) r.session = sessionId || hrRec || micRec 
 
 /* ================= Wachhalten ================= */
 let wakeLock = null, wlPending = null;
-function needAwake() { return running || hrWanted || micOn; }
+function needAwake() { return running || hrWanted || micOn || !!breath; }
 async function keepAwake() {
   keepTone();
   if (wakeLock && !wakeLock.released) return;
@@ -333,14 +361,52 @@ $("addnote").addEventListener("click", () => {
   addEntry({ typ: "Notiz", name: t, start: Date.now() }); $("note").value = "";
 });
 
-let blockedSince = null;
+/* Jeder Durchgang eigene Zeile, Start sofort geschrieben, Aussetzer und Abspielposition mitprotokolliert */
+let stall = null, stallSeen = false, lastSync = 0, lastDrift = null;
+function passName(c = current) { return c.reps > 1 ? `${c.name} ${c.rep}/${c.reps}` : c.name; }
+function openStall(cause) {
+  if (!current || stall) return;
+  stall = { t: Date.now(), pos: audio.currentTime || 0, cause };
+}
+function closeStall() {
+  if (!stall) return;
+  const st = stall; stall = null; stallSeen = true;
+  if (!current || Date.now() - st.t < 100) return;
+  addEntry({ typ: "Aussetzer", block: current.block, pos: current.pos, name: `${passName()}: ${st.cause} bei ${st.pos.toFixed(1)} s`, start: st.t, end: Date.now() });
+  flush();
+}
+function syncPos(force, noCheck) {
+  if (!current || !current.start) return;
+  const now = Date.now();
+  if (!force && now - lastSync < 10000) return;
+  lastSync = now;
+  const c = audio.currentTime, d = Math.round(now - current.start - c * 1000);
+  put("sync", { t: now, s: sessionId, b: current.block, p: current.pos, r: current.rep, n: passName(), c, d });
+  if (!noCheck && lastDrift !== null && !stall && !stallSeen && Math.abs(d - lastDrift) > 300)
+    addEntry({ typ: "Aussetzer", block: current.block, pos: current.pos, name: `${passName()}: ${d - lastDrift} ms Abweichung ohne Meldung des Browsers bei ${c.toFixed(1)} s`, start: now });
+  lastDrift = d; stallSeen = false;
+}
+function markStart() {
+  if (!current || current.start) return;
+  const now = Date.now();
+  current.start = Math.round(now - (audio.currentTime || 0) * 1000);
+  lastDrift = null; stallSeen = false;
+  addEntry({ typ: "Stückstart", block: current.block, pos: current.pos, name: passName(), start: current.start });
+  syncPos(true); flush();
+}
+function finishPass(suffix) {
+  if (!current) return;
+  syncPos(true, true); closeStall();
+  current.end = Date.now(); if (!current.start) current.start = current.end;
+  addEntry({ typ: "Stück", block: current.block, pos: current.pos, rep: current.rep, name: passName() + (suffix || ""), start: current.start, end: current.end });
+  flush();
+}
 function tryPlay() {
   if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
   audio.play().then(() => {
-    if (blockedSince) { addEntry({ typ: "Unterbrechung", block: current ? current.block : "", name: "Wiedergabe angehalten (Gerät/Browser)", start: blockedSince, end: Date.now() }); blockedSince = null; }
     $("resume").style.display = "none";
   }).catch(() => {
-    if (!blockedSince) blockedSince = Date.now();
+    openStall("Wiedergabe blockiert");
     $("now").textContent = "Musik angehalten. Bitte auf „Weiter“ tippen.";
     $("resume").style.display = "inline-block";
   });
@@ -352,31 +418,39 @@ function next() {
   let p;
   if (sleep && sleep.calm) {
     p = PIECES.find(x => x.key === CALM[calmIdx % CALM.length]); calmIdx++;
-    current = { typ: "Stück", block: "Schlaf", pos: calmIdx, name: p.name, start: null, end: null, rep: 1, reps: 1 };
+    current = { typ: "Stück", block: "Schlaf", pos: calmIdx, name: p.base || p.name, start: null, end: null, rep: 1, reps: 1 };
   } else {
     const order = orderOf(blockNo);
     if (pos >= order.length) { blockNo++; pos = 0; return next(); }
     p = order[pos];
-    current = { typ: "Stück", block: blockNo, pos: pos + 1, name: p.name, start: null, end: null, rep: 1, reps: p.reps || 1 };
+    current = { typ: "Stück", block: blockNo, pos: pos + 1, name: p.base || p.name, start: null, end: null, rep: 1, reps: p.reps || 1 };
   }
   audio.src = urls[p.key]; tryPlay();
   try { navigator.mediaSession.metadata = new MediaMetadata({ title: p.name, artist: `Block ${blockNo}, Position ${pos + 1}` }); } catch (e) {}
-  $("now").textContent = p.name;
+  $("now").textContent = passName();
 }
-setInterval(() => { if (running && current && audio.paused && !audio.ended) { if (!blockedSince) blockedSince = Date.now(); tryPlay(); } }, 3000);
+setInterval(() => { if (running && current && audio.paused && !audio.ended) { openStall("Wiedergabe angehalten"); tryPlay(); } }, 3000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && running && current && audio.paused) tryPlay(); });
-audio.addEventListener("playing", () => { if (current && !current.start) current.start = Date.now(); if (current) $("now").textContent = current.name; });
+audio.addEventListener("playing", () => { markStart(); closeStall(); if (current) $("now").textContent = passName(); });
+audio.addEventListener("waiting", () => { if (running && current && current.start) openStall("Puffern"); });
+audio.addEventListener("pause", () => { if (running && current && current.start && !audio.ended && !(audio.duration && audio.currentTime >= audio.duration - 0.05)) openStall("Wiedergabe angehalten"); });
+audio.addEventListener("timeupdate", () => {
+  if (!current || audio.paused) return;
+  markStart();
+  if (stall && audio.readyState >= 3 && audio.currentTime > stall.pos + 0.2) closeStall();
+  syncPos();
+});
 audio.addEventListener("ended", () => {
   if (!current) return;
-  if (current.rep < current.reps) { current.rep++; audio.currentTime = 0; tryPlay(); return; }
-  current.end = Date.now(); if (!current.start) current.start = current.end;
-  const r = { ...current }; delete r.rep; delete r.reps; addEntry(r); current = null;
+  finishPass();
+  if (current.rep < current.reps) { current.rep++; current.start = null; current.end = null; audio.currentTime = 0; $("now").textContent = passName(); tryPlay(); return; }
+  current = null;
   if (!(sleep && sleep.calm)) pos++;
   next();
 });
 audio.addEventListener("error", () => {
-  if (current) addEntry({ typ: "Fehler", block: current.block, name: "Wiedergabefehler bei " + current.name, start: Date.now() });
-  current = null; pos++; setTimeout(next, 500);
+  if (current) addEntry({ typ: "Fehler", block: current.block, name: "Wiedergabefehler bei " + passName(), start: Date.now() });
+  stall = null; current = null; pos++; setTimeout(next, 500);
 });
 setInterval(() => {
   if (!running || !current) return;
@@ -406,7 +480,7 @@ $("slstart").addEventListener("click", () => {
   setVol(0);
   addEntry({ typ: "Einschlafen", name: `Beginn, ${mins} min Ausblenden, ${calm ? "nur ruhige Stücke" : "normale Reihenfolge"}`, start: Date.now() });
   if (!running) { if (!startMusic()) { sleep = null; return; } }
-  else if (calm) { if (current && current.start) { current.end = Date.now(); current.name += " (abgebrochen für Einschlafen)"; const r = { ...current }; delete r.rep; delete r.reps; addEntry(r); } current = null; next(); }
+  else if (calm) { if (current && current.start) finishPass(" (abgebrochen für Einschlafen)"); stall = null; current = null; next(); }
   $("slstart").style.display = "none"; $("slstop").style.display = "inline-block";
   $("slnormal").disabled = $("slcalm").disabled = $("sldur").disabled = true;
   sleepT = setInterval(sleepTick, 1000); sleepTick();
@@ -434,8 +508,8 @@ $("slstop").addEventListener("click", () => { endSleep("Einschlafen abgebrochen"
 function stopMusic(reason) {
   if (!running) return;
   running = false; audio.pause();
-  if (current && current.start) { current.end = Date.now(); current.name += " (abgebrochen)"; addEntry(current); }
-  current = null;
+  if (current && current.start) finishPass(" (abgebrochen)");
+  stall = null; current = null;
   addEntry({ typ: "Stopp", name: `Musik beendet, nächster Block wäre ${blockNo + (pos > 0 ? 1 : 0)}`, start: Date.now(), session: sessionId });
   $("now").textContent = "Musik gestoppt."; $("sub").textContent = "";
   $("stop").disabled = true; $("block").disabled = false; $("silence").disabled = false;
@@ -470,9 +544,12 @@ function onHr(ev) {
   hrStatus(`Verbunden · Puls ${bpm} · ${nBeats} Herzschläge in dieser Aufzeichnung` + (nLate ? ` · ${nLate} nachgeliefert` : ""));
 }
 function liveBeats(rrs, now) {
-  let t = now; const fresh = [];
-  for (let i = rrs.length - 1; i >= 0; i--) { fresh.unshift([Math.round(t), Math.round(rrs[i]), hrRec, now]); t -= rrs[i]; }
-  fresh.forEach(b => put("beat", b)); nBeats += fresh.length; lastBeat = fresh[fresh.length - 1][0];
+  /* Schlag an Schlag über die RR-Abstände verketten. Neu an die Ankunftszeit anlegen nur, wenn die Kette über 3 s davonläuft. */
+  const sum = rrs.reduce((a, b) => a + b, 0);
+  let t = (lastBeat !== null && Math.abs(lastBeat + sum - now) < 3000) ? lastBeat + sum : now;
+  const fresh = [];
+  for (let i = rrs.length - 1; i >= 0; i--) { fresh.unshift([t, Math.round(rrs[i]), hrRec, now]); t -= rrs[i]; }
+  fresh.forEach(b => put("beat", [Math.round(b[0]), b[1], b[2], b[3]])); nBeats += fresh.length; lastBeat = fresh[fresh.length - 1][0];
 }
 function finishBurst(endT) {
   const b = burst; burst = null; if (!b) return;
@@ -633,6 +710,7 @@ $("hrstop").addEventListener("click", async () => {
   hrRec = null; $("hrstop").disabled = true; $("hrconnect").textContent = "Gurt verbinden";
   $("useacc").disabled = $("useecg").disabled = $("accrate").disabled = false;
   flush();
+  if (tpDev) tpFetch();
 });
 
 /* ================= Klang: Mikrofon und eigene Musik ================= */
@@ -851,13 +929,13 @@ function tapOwn() {
 function lastMusicSession() { for (let i = log.length - 1; i >= 0; i--) if (log[i].typ === "Stück") return log[i].session; return null; }
 function renderReview() {
   const sid = lastMusicSession();
-  const pieces = log.filter(r => r.session === sid && r.typ === "Stück");
+  const pieces = log.filter(r => r.session === sid && r.typ === "Stück" && (r.rep || 1) === 1);
   if (!sid || !pieces.length) { $("review").style.display = "none"; return; }
   const chosen = {};
   log.filter(r => r.session === sid && r.typ === "Erleben").forEach(r => { chosen[r.ref] = r.feel; });
   $("reviewlist").innerHTML = pieces.map(p => {
     const ref = p.block + "-" + p.pos;
-    return `<div class="rv"><b>${stamp(new Date(p.start)).slice(0, 5)} · ${p.name}</b><br>` +
+    return `<div class="rv"><b>${stamp(new Date(p.start)).slice(0, 5)} · ${p.name.replace(/ 1\/\d+/, "")}</b><br>` +
       FEEL.map(f => `<button data-ref="${ref}" data-f="${f}" class="${chosen[ref] === f ? "on" : ""}">${f}</button>`).join("") + `</div>`;
   }).join("");
   $("review").style.display = "block";
@@ -880,14 +958,14 @@ try {
 /* ================= Schwarzsperre ================= */
 let lastTap = 0, qTimer = null;
 function blackOn() {
-  $("blackout").style.display = "block"; $("unlockq").style.display = "none";
+  $("blackout").style.display = "block"; $("unlockq").style.display = "none"; $("blackout").appendChild($("bvis"));
   keepAwake();
   try { document.documentElement.requestFullscreen?.(); } catch (e) {}
   addEntry({ typ: "Bildschirm", name: "Schwarzsperre an", start: Date.now() });
 }
 function blackOff() {
   $("guard").style.display = "block"; setTimeout(() => { $("guard").style.display = "none"; }, 1200);
-  $("blackout").style.display = "none"; $("unlockq").style.display = "none";
+  $("blackout").style.display = "none"; $("unlockq").style.display = "none"; $("bhome").appendChild($("bvis"));
   try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
   addEntry({ typ: "Bildschirm", name: "Schwarzsperre aus", start: Date.now() });
 }
@@ -907,6 +985,164 @@ $("blackout").addEventListener("pointerdown", e => {
 $("unlockyes").addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); clearTimeout(qTimer); blackOff(); });
 $("unlockno").addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); clearTimeout(qTimer); $("unlockq").style.display = "none"; });
 ["pointerdown", "pointerup", "click", "touchstart", "touchend"].forEach(ev => $("guard").addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); }, { passive: false }));
+
+/* ================= Atemhilfe ================= */
+const BP = ["Einatmen", "Pause", "Ausatmen", "Pause 2"];
+const BMARK = [[[620, 900], 1], [[1050], 0.45], [[900, 620], 1], [[420], 0.45]];
+let breath = null, bOpt = false, bTon = false, bGain = null, bRaf = null;
+const bNodes = new Set();
+function bTimes() {
+  const T = [0, 1, 2, 3].map(i => parseFloat(String($("b" + i).value).replace(",", ".")));
+  if (T.some(v => !Number.isFinite(v) || v < 0 || v > 60) || T[0] < 0.5 || T[2] < 0.5) { $("bstatus").textContent = "Bitte Zeiten prüfen: Einatmen und Ausatmen mindestens 0,5 s, höchstens 60 s, Pausen ab 0 s."; return null; }
+  $("bstatus").textContent = ""; return T.map(v => Math.round(v * 1000));
+}
+function bMode() { return bOpt && bTon ? "Optik und Töne" : bOpt ? "Optik" : "Töne"; }
+function bLogState(prefix) { const T = breath.T.map(v => num(v / 1000)); addEntry({ typ: "Atemhilfe", name: `${prefix}: ${bMode()}, Einatmen ${T[0]} s, Pause ${T[1]} s, Ausatmen ${T[2]} s, Pause 2 ${T[3]} s`, start: Date.now() }); flush(); }
+function bOutput() {
+  ensureCtx();
+  if (!bGain) { bGain = ctx.createGain(); bGain.connect(ctx.destination); }
+  bGain.gain.value = Math.pow($("bvol").value / 100, 2);
+}
+function bTone(f, at, dur, level) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = "triangle"; o.frequency.value = f;
+  g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(level, at + 0.012);
+  g.gain.setValueAtTime(level, at + dur - 0.04); g.gain.linearRampToValueAtTime(0, at + dur);
+  o.connect(g); g.connect(bGain); o.start(at); o.stop(at + dur + 0.02);
+  bNodes.add(o); o.onended = () => { bNodes.delete(o); g.disconnect(); };
+}
+function bMark(ev) {
+  const at = ctx.currentTime + (ev.t - Date.now()) / 1000;
+  if (at < ctx.currentTime + 0.02) return;
+  const [fs, level] = BMARK[ev.i];
+  fs.forEach((f, k) => bTone(f, at + k * 0.19, 0.14, level));
+}
+function bCancel() { bNodes.forEach(o => { try { o.stop(); } catch (e) {} }); bNodes.clear(); }
+function bFill() {
+  const b = breath, end = Date.now() + 70000;
+  while (b.cur.t < end) {
+    const i = b.cur.i;
+    if (b.T[i] > 0) { const ev = { t: b.cur.t, i, d: b.T[i] }; b.ev.push(ev); if (bTon && ctx) bMark(ev); }
+    b.cur = { t: b.cur.t + b.T[i], i: (i + 1) % 4 };
+  }
+}
+function bBegin(T) {
+  const t0 = Date.now() + 700;
+  breath = { T, t0, total: T.reduce((a, c) => a + c, 0), cur: { t: t0, i: 0 }, ev: [], off: null };
+  if (bTon) { bOutput(); breath.off = Date.now() / 1000 - ctx.currentTime; }
+  bFill();
+}
+function bRemark() { const now = Date.now(); bCancel(); if (bTon) { bOutput(); breath.off = now / 1000 - ctx.currentTime; breath.ev.filter(e => e.t > now).forEach(bMark); } }
+function bShow() {
+  $("bvis").style.display = bOpt ? "block" : "none";
+  $("bopt").classList.toggle("on", bOpt); $("bopt").textContent = "Optik: " + (bOpt ? "an" : "aus");
+  $("bton").classList.toggle("on", bTon); $("bton").textContent = "Töne: " + (bTon ? "an" : "aus");
+  if (bOpt && !bRaf) bRaf = requestAnimationFrame(bDraw);
+}
+function bToggle(kind) {
+  const wasOff = !breath, T = wasOff ? bTimes() : null;
+  if (wasOff && !T) return;
+  bWrite();
+  if (kind === "o") bOpt = !bOpt; else bTon = !bTon;
+  if (!bOpt && !bTon) { bCancel(); bWrite(); breath = null; addEntry({ typ: "Atemhilfe", name: "aus", start: Date.now() }); flush(); $("bstatus").textContent = ""; }
+  else if (wasOff) { bBegin(T); bLogState("an"); keepAwake(); }
+  else { if (kind === "t") bRemark(); bLogState("geändert"); }
+  bShow(); wlShow();
+}
+$("bopt").addEventListener("click", () => bToggle("o"));
+$("bton").addEventListener("click", () => bToggle("t"));
+$("bvol").addEventListener("input", () => { if (bGain) bGain.gain.value = Math.pow($("bvol").value / 100, 2); });
+$("bvol").addEventListener("change", () => { if (breath && bTon) addEntry({ typ: "Atemhilfe", name: `Lautstärke Töne ${$("bvol").value} %`, start: Date.now() }); });
+[0, 1, 2, 3].forEach(i => $("b" + i).addEventListener("change", () => {
+  if (!breath) { bTimes(); return; }
+  const T = bTimes(); if (!T) return;
+  bCancel(); bWrite(); bBegin(T); bLogState("Zeiten geändert");
+}));
+function bWrite() {
+  const b = breath, now = Date.now(); if (!b) return;
+  while (b.ev.length && b.ev[0].t <= now) { const e = b.ev.shift(); put("atem", { t: e.t, p: BP[e.i], d: e.d, o: bOpt, n: bTon, s: sessionId || hrRec || micRec || "" }); }
+}
+setInterval(() => {
+  if (!breath) return;
+  bWrite(); bFill();
+  if (bTon && ctx) {
+    if (ctx.state !== "running") ctx.resume().catch(() => {});
+    const off = Date.now() / 1000 - ctx.currentTime;
+    if (breath.off === null || Math.abs(off - breath.off) > 0.25) bRemark();
+  }
+}, 1000);
+function bDraw() {
+  if (!breath || !bOpt) { bRaf = null; return; }
+  const b = breath, el = Date.now() - b.t0, ease = f => 0.5 - 0.5 * Math.cos(Math.PI * f);
+  let sc = 0.45, txt = "gleich geht es los";
+  if (el >= 0) {
+    let x = el % b.total;
+    for (let i = 0; i < 4; i++) {
+      if (x < b.T[i]) {
+        const f = x / b.T[i];
+        sc = i === 0 ? 0.45 + 0.55 * ease(f) : i === 1 ? 1 : i === 2 ? 1 - 0.55 * ease(f) : 0.45;
+        txt = `${BP[i]} ${Math.ceil((b.T[i] - x) / 1000)}`;
+        break;
+      }
+      x -= b.T[i];
+    }
+  }
+  $("bcirc").style.transform = `scale(${sc})`; $("btxt").textContent = txt;
+  bRaf = requestAnimationFrame(bDraw);
+}
+
+/* ================= Raumtemperatur ThermoPro TP357 ================= */
+const TP_SVC = "00010203-0405-0607-0809-0a0b0c0d1910", TP_READ = "00010203-0405-0607-0809-0a0b0c0d2b10", TP_WRITE = "00010203-0405-0607-0809-0a0b0c0d2b11";
+let tpDev = null, tpBusy = false;
+function tpStatus(t) { $("tpstatus").textContent = t; }
+async function tpFetch() {
+  if (tpBusy || !tpDev) return;
+  tpBusy = true; $("tpget").disabled = true; tpStatus("Verbinde mit dem Thermometer …");
+  let rd = null, h = null;
+  try {
+    const server = await tpDev.gatt.connect(), svc = await server.getPrimaryService(TP_SVC);
+    rd = await svc.getCharacteristic(TP_READ);
+    const wr = await svc.getCharacteristic(TP_WRITE), vals = [];
+    tpStatus("Lese den Verlauf …");
+    const t0 = Math.round(Date.now() / 60000) * 60000 - 1439 * 60000;
+    await new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error("keine Antwort vom Thermometer")), 45000);
+      h = e => {
+        const v = e.target.value, c = v.getUint8(0);
+        if (c === 0xC2) { clearTimeout(to); res(); return; }
+        if (c !== 0xA7 || v.byteLength < 19) return;
+        const raw = v.getInt16(1, true);
+        for (let i = 0; i < 5; i++) {
+          const o = 4 + 3 * i, t10 = v.getInt16(o, true), rh = v.getUint8(o + 2);
+          if (t10 > 1024 || rh > 100) continue;
+          vals.push({ t: t0 + (5 * (raw - 1) + i) * 60000, c: t10 / 10, h: rh });
+        }
+      };
+      rd.addEventListener("characteristicvaluechanged", h);
+      rd.startNotifications().then(() => wr.writeValueWithoutResponse(new Uint8Array([0xA7, 0, 0, 0, 0, 0x7A]))).catch(e => { clearTimeout(to); rej(e); });
+    });
+    vals.forEach(r => put("temp", r));
+    if (!vals.length) throw new Error("das Thermometer lieferte keine Werte");
+    const last = vals.reduce((a, b) => (b.t > a.t ? b : a));
+    addEntry({ typ: "Temperatur", name: `Verlauf abgeholt, ${vals.length} Werte, zuletzt ${num(last.c)} °C und ${last.h} % Luftfeuchte`, start: Date.now() });
+    tpStatus(`Abgeholt: ${vals.length} Minutenwerte, zuletzt ${num(last.c)} °C und ${last.h} % Luftfeuchte.`);
+    await flush();
+  } catch (e) {
+    tpStatus("Abholen nicht möglich: " + (e && e.message ? e.message : e) + ". Thermometer in die Nähe legen, ThermoPro-App schließen und nochmal tippen.");
+    addEntry({ typ: "Temperatur", name: "Abholen fehlgeschlagen: " + (e && e.message ? e.message : e), start: Date.now() });
+  }
+  try { if (rd && h) rd.removeEventListener("characteristicvaluechanged", h); } catch (e) {}
+  try { tpDev.gatt.disconnect(); } catch (e) {}
+  tpBusy = false; $("tpget").disabled = false;
+}
+$("tpget").addEventListener("click", async () => {
+  if (!navigator.bluetooth) { tpStatus("Bluetooth ist in diesem Browser nicht verfügbar."); return; }
+  if (!tpDev) {
+    try { tpDev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "TP357" }], optionalServices: [TP_SVC] }); }
+    catch (e) { tpStatus("Kein Thermometer gewählt."); return; }
+  }
+  tpFetch();
+});
 
 /* ================= Export als ZIP ================= */
 const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -936,7 +1172,7 @@ function tcols(ms) { const d = new Date(ms); return [dstamp(d), stamp(d), Math.r
 async function buildZip() {
   $("savestatus").textContent = "Stelle Daten zusammen …";
   await flush();
-  const [L, BT, SN, EV, AC, EC] = await Promise.all(["log", "beat", "snd", "evt", "acc", "ecg"].map(readKind));
+  const [L, BT, SN, EV, AC, EC, SY, AT, TP] = await Promise.all(["log", "beat", "snd", "evt", "acc", "ecg", "sync", "atem", "temp"].map(readKind));
   const files = [];
   // Messdaten.csv im bisherigen Format (Protokoll plus Herzschläge), damit die alten Auswertungen weiter passen
   const m = ["Sitzung;Typ;Block;Position;Bezeichnung;Datum;Start;Ende;Dauer_s;RR_ms;Ankunft"];
@@ -957,22 +1193,44 @@ async function buildZip() {
   // Sensorzeit -> Uhrzeit: kleinste Verzögerung je Sitzung (live empfangene Pakete)
   const offs = {};
   [["a", AC], ["e", EC]].forEach(([kind, arr]) => arr.forEach(c => { const o = c.t - c.us / 1000; const k = kind + (c.s ?? ""); if (offs[k] === undefined || o < offs[k]) offs[k] = o; }));
+  /* Tatsächlicher Abstand der Werte aus den Zeitstempeln aufeinanderfolgender Pakete statt der Nennrate */
+  const realDt = (arr, i, n, nominal) => {
+    const p = i > 0 ? arr[i - 1] : null; if (!p || p.s !== arr[i].s || n <= 0) return nominal;
+    const d = (arr[i].us - p.us) / 1000 / n;
+    return d > nominal * 0.75 && d < nominal * 1.25 ? d : nominal;
+  };
   if (AC.length) {
     const s = ["Sitzung;Datum;Zeit;Epoch_ms;Sensor_us;x_mg;y_mg;z_mg"];
-    AC.forEach(c => { const n = c.v.length / 3, dt = 1000 / c.r;
+    AC.forEach((c, idx) => { const n = c.v.length / 3, dt = realDt(AC, idx, n, 1000 / c.r);
       const base = c.us / 1000 + offs["a" + (c.s ?? "")];
       for (let i = 0; i < n; i++) { const off = (n - 1 - i) * dt; s.push([c.s ?? "", ...tcols(base - off), Math.round(c.us - off * 1000), c.v[3 * i], c.v[3 * i + 1], c.v[3 * i + 2]].join(";")); } });
     files.push({ name: "Beschleunigung.csv", text: s.join("\n") });
   }
   if (EC.length) {
     const s = ["Sitzung;Epoch_ms;Sensor_us;EKG_uV"];
-    EC.forEach(c => { const n = c.v.length, dt = 1000 / c.r;
+    EC.forEach((c, idx) => { const n = c.v.length, dt = realDt(EC, idx, n, 1000 / c.r);
       const base = c.us / 1000 + offs["e" + (c.s ?? "")];
       for (let i = 0; i < n; i++) { const off = (n - 1 - i) * dt; s.push([c.s ?? "", Math.round(base - off), Math.round(c.us - off * 1000), c.v[i]].join(";")); } });
     files.push({ name: "EKG.csv", text: s.join("\n") });
   }
+  if (SY.length) {
+    const s = ["Sitzung;Block;Position;Durchgang;Stueck;Datum;Zeit;Epoch_ms;Abspielposition_s;Verzoegerung_ms"];
+    SY.forEach(r => s.push([r.s ?? "", r.b ?? "", r.p ?? "", r.r ?? "", r.n, ...tcols(r.t), num(r.c, 3), r.d].join(";")));
+    files.push({ name: "Musikposition.csv", text: s.join("\n") });
+  }
+  if (AT.length) {
+    const s = ["Sitzung;Phase;Datum;Zeit;Epoch_ms;Dauer_s;Optik;Toene"];
+    AT.forEach(r => s.push([r.s ?? "", r.p, ...tcols(r.t), num(r.d / 1000), r.o ? "an" : "aus", r.n ? "an" : "aus"].join(";")));
+    files.push({ name: "Atemhilfe.csv", text: s.join("\n") });
+  }
+  if (TP.length) {
+    const byMin = new Map(); TP.forEach(r => byMin.set(r.t, r));
+    const s = ["Datum;Zeit;Epoch_ms;Temperatur_C;Luftfeuchte_Prozent"];
+    [...byMin.values()].sort((a, b) => a.t - b.t).forEach(r => s.push([...tcols(r.t), num(r.c), r.h].join(";")));
+    files.push({ name: "Temperatur.csv", text: s.join("\n") });
+  }
   const blob = makeZip(files);
-  return { blob, name: "Messdaten3_" + idstamp(new Date()) + ".zip", list: files.map(f => f.name).join(", ") };
+  return { blob, name: "Messdaten4_" + idstamp(new Date()) + ".zip", list: files.map(f => f.name).join(", ") };
 }
 $("saveall").addEventListener("click", async () => {
   const z = await buildZip(), a = document.createElement("a");
