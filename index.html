@@ -1582,29 +1582,28 @@ $("teststart").addEventListener("click", () => { if (!$("testab").checked) { $("
 /* Klopfabgleich live: grob aus der Ankunftszeit, genau rechnet der Export */
 const tapLive = { c: [], f: [], mc: null, mf: null, done: 0 };
 function tapFeed(k, now, vals, dt) {
-  const n = vals.length / 3, key = k === "c" ? "mc" : "mf", Lst = tapLive[k];
+  const n = vals.length / 3, key = k === "c" ? "mc" : "mf", Lst = tapLive[k], thr = k === "c" ? 250 : 1000;
   for (let i = 0; i < n; i++) {
     const mag = Math.hypot(vals[3 * i], vals[3 * i + 1], vals[3 * i + 2]), m = tapLive[key] ?? mag;
     tapLive[key] = m + 0.05 * (mag - m);
     const t = now - (n - 1 - i) * dt;
-    if (Math.abs(mag - m) > 600 && (!Lst.length || t - Lst[Lst.length - 1] > 120)) { Lst.push(t); if (Lst.length > 20) Lst.shift(); }
+    if (Math.abs(mag - m) > thr && (!Lst.length || t - Lst[Lst.length - 1] > 120)) { Lst.push(t); if (Lst.length > 30) Lst.shift(); }
   }
   tapCheck();
 }
+/* letzte abgeschlossene Gruppe von 3 bis 8 Klopfern, davor 1,5 s ruhig, danach 1,5 s nichts mehr */
 function tapGrp(L) {
-  const n = L.length; if (n < 3) return null;
-  const a = L[n - 3], b = L[n - 2], c = L[n - 1];
-  if (b - a < 150 || b - a > 900 || c - b < 150 || c - b > 900) return null;
-  if (n > 3 && a - L[n - 4] < 2000) return null;
-  if (Date.now() - c < 1500) return null;
-  return [a, b, c];
+  const n = L.length; if (n < 3 || Date.now() - L[n - 1] < 1500) return null;
+  let s = n - 1; while (s > 0 && L[s] - L[s - 1] >= 120 && L[s] - L[s - 1] <= 900) s--;
+  const k = n - s; if (k < 3 || k > 25) return null;
+  if (s > 0 && L[s] - L[s - 1] < 1200) return null;
+  return L.slice(s);
 }
 function tapCheck() {
   const gc = tapGrp(tapLive.c), gf = tapGrp(tapLive.f); if (!gc || !gf) return;
   if (Math.abs(gc[0] - gf[0]) > 3000 || gc[0] === tapLive.done) return;
   tapLive.done = gc[0];
-  const off = Math.round((gc[0] - gf[0] + gc[1] - gf[1] + gc[2] - gf[2]) / 3);
-  addEntry({ typ: "Abgleich", name: `Dreimal Klopfen an Gurt und Sense erkannt, grober Versatz ${off} ms (genau beim Speichern)`, start: gc[0] });
+  addEntry({ typ: "Abgleich", name: `Klopfen an Gurt und Sense erkannt (${gc.length} an der Brust, ${gf.length} am Fuß), grober Versatz ${Math.round(gc[0] - gf[0])} ms, genau beim Speichern`, start: gc[0] });
   $("vstatus").textContent = "Abgleich erkannt ✓"; say("Abgleich erkannt"); flush();
 }
 
@@ -1699,28 +1698,51 @@ function alignBeats(B, R) {
   return { lag: g.lag, ok, out };
 }
 
-/* Dreimal Klopfen in Brust und Fuß */
-function tapGroups(X, w) {
-  if (!X || X.t.length < 100) return [];
-  const m = magHP(X, w), thr = Math.max(500, 25 * medianSub(m)), t = X.t;
-  const pk = peaksAbove(m, t, thr, 120).map(i => {
-    if (i < 1 || i >= m.length - 1) return t[i];
-    const a = m[i - 1], b = m[i], c = m[i + 1], den = a - 2 * b + c;
-    return t[i] + (den < 0 ? 0.5 * (a - c) / den : 0) * (t[i + 1] - t[i]);
+/* Klopfen in Brust und Fuß: Gruppen von 3 bis 8 Spitzen im Abstand 0,12 bis 0,9 s, davor ruhig */
+function tapPeaks(X, w, floor) {
+  if (!X || X.t.length < 100) return { pk: [], m: null };
+  const m = magHP(X, w), t = X.t, base = movMean(m, Math.round(2000 / ((t[t.length - 1] - t[0]) / t.length)) | 1);
+  const idx = peaksAbove(m, t, floor, 120);
+  const pk = idx.map(i => {
+    let tt = t[i];
+    if (i >= 1 && i < m.length - 1) { const a = m[i - 1], b = m[i], c = m[i + 1], den = a - 2 * b + c; if (den < 0) tt += 0.5 * (a - c) / den * (t[i + 1] - t[i]); }
+    return { t: tt, h: m[i], i };
   });
+  return { pk, m, base };
+}
+function tapGroups(X, w, floor) {
+  const { pk, m } = tapPeaks(X, w, floor); if (!pk.length) return [];
   const g = [];
-  for (let i = 0; i + 2 < pk.length; i++) {
-    const a = pk[i], b = pk[i + 1], c = pk[i + 2];
-    if (b - a >= 150 && b - a <= 900 && c - b >= 150 && c - b <= 900 && (i === 0 || a - pk[i - 1] > 2000) && (i + 3 >= pk.length || pk[i + 3] - c > 2000)) { g.push([a, b, c]); i += 2; }
+  for (let i = 0; i < pk.length;) {
+    let e = i; while (e + 1 < pk.length && pk[e + 1].t - pk[e].t >= 120 && pk[e + 1].t - pk[e].t <= 900) e++;
+    const n = e - i + 1;
+    if (n >= 3 && n <= 25) {
+      /* ruhig in der Sekunde davor: dort kein Wert über einem Drittel der mittleren Spitze */
+      const lo = lowerBound(X.t, pk[i].t - 1200), hi = lowerBound(X.t, pk[i].t - 200), hs = pk.slice(i, e + 1).map(p => p.h).sort((x, y) => x - y), minH = hs[hs.length >> 1] * 1.7;
+      let q = 0; for (let k = lo; k < hi; k++) q = Math.max(q, m[k]);
+      if (q < minH / 5 && (i === 0 || pk[i].t - pk[i - 1].t > 1200)) g.push(pk.slice(i, e + 1).map(p => p.t));
+    }
+    i = e + 1;
   }
   return g;
 }
+/* Versatz über die Ähnlichkeit der Klopfspuren: beide Beträge auf 2 ms gerastert, logarithmiert, Korrelation über plus minus 500 ms */
+function envAt(X, hp, t0, t1) { const n = Math.floor((t1 - t0) / 2), o = new Float32Array(n); let j = lowerBound(X.t, t0) - 1; if (j < 0) j = 0;
+  for (let i = 0; i < n; i++) { const t = t0 + 2 * i; while (j < X.t.length - 2 && X.t[j + 1] < t) j++; const a = X.t[j], b = X.t[j + 1] ?? a, f = b > a ? Math.min(1, Math.max(0, (t - a) / (b - a))) : 0; o[i] = Math.log1p(hp[j] * (1 - f) + (hp[j + 1] ?? hp[j]) * f); } return o; }
+function corr(a, b) { const n = Math.min(a.length, b.length); let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n; let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; } return saa && sbb ? sab / Math.sqrt(saa * sbb) : 0; }
 function tapSync(A, F) {
-  const gc = tapGroups(A, 15), gf = tapGroups(F, 16), pairs = [];
-  gc.forEach(c => { const f = gf.find(f => Math.abs(f[0] - c[0]) < 3000); if (f) { const d = [0, 1, 2].map(k => c[k] - f[k]); pairs.push({ t: c[0], off: (d[0] + d[1] + d[2]) / 3, streu: Math.max(...d) - Math.min(...d) }); } });
+  const gc = tapGroups(A, 15, 250), gf = tapGroups(F, 16, 1000), pairs = [];
+  if (gc.length && F) {
+    const ha = magHP(A, 15), hf = magHP(F, 16);
+    gc.forEach(c => {
+      const t0 = c[0] - 300, t1 = c[c.length - 1] + 300, ce = envAt(A, ha, t0, t1); let best = { off: 0, r: -1 };
+      for (let off = -500; off <= 500; off += 2) { const r = corr(ce, envAt(F, hf, t0 - off, t1 - off)); if (r > best.r) best = { off, r }; }
+      if (best.r > 0.4) pairs.push({ t: c[0], off: best.off, r: best.r, n: c.length, streu: null });
+    });
+  }
   let fn = () => 0, drift = null;
   if (pairs.length === 1) fn = () => pairs[0].off;
-  if (pairs.length >= 2) { const p = pairs[0], q = pairs[pairs.length - 1], k = (q.off - p.off) / (q.t - p.t || 1); fn = t => p.off + k * (t - p.t); drift = k * 3600000; }
+  if (pairs.length >= 2) { const p = pairs[0], q = pairs[pairs.length - 1]; if (q.t - p.t > 600000) { const k = (q.off - p.off) / (q.t - p.t); fn = t => p.off + k * (t - p.t); drift = k * 3600000; } else { const o = pairs.reduce((a, x) => a + x.off, 0) / pairs.length; fn = () => o; } }
   return { gc, gf, pairs, fn, drift };
 }
 
@@ -1729,8 +1751,9 @@ function stepsDetect(F, G, A) {
   const out = []; if (!F || F.t.length < 200) return out;
   const fm = magHP(F, 22), strikes = [];
   if (G && G.t.length > 200) {
-    const gm = magOf(G), gs = movMean(gm, 3), thr = Math.max(80, 4 * medianSub(gs));
-    peaksAbove(gs, G.t, thr, 600).forEach(i => {
+    const gm = magOf(G), gs = movMean(gm, 3), cand = peaksAbove(gs, G.t, 80, 600);
+    /* Schwung des eigenen Beins: Spitze über 40 Prozent der stärksten in 3 s Umgebung */
+    cand.filter((i, k) => { let mx = 0; for (let j = k; j >= 0 && G.t[i] - G.t[cand[j]] < 3000; j--) mx = Math.max(mx, gs[cand[j]]); for (let j = k; j < cand.length && G.t[cand[j]] - G.t[i] < 3000; j++) mx = Math.max(mx, gs[cand[j]]); return gs[i] >= 0.4 * mx; }).forEach(i => {
       const P = gs[i]; let e = i, s = i;
       while (e < gs.length - 1 && gs[e] > 0.25 * P && G.t[e] - G.t[i] < 800) e++;
       while (s > 0 && gs[s] > 0.25 * P && G.t[i] - G.t[s] < 800) s--;
@@ -1740,14 +1763,14 @@ function stepsDetect(F, G, A) {
     });
   } else {
     /* eigener Aufprall ist am Knöchel stark, der Schritt des anderen Fußes nur schwach: relativ zum stärksten Ausschlag in 3 s Umgebung */
-    const fs = movMean(fm, 2), thr = Math.max(150, 5 * medianSub(fs)), cand = peaksAbove(fs, F.t, thr, 300);
+    const fs = movMean(fm, 2), cand = peaksAbove(fs, F.t, 150, 300);
     cand.forEach((i, k) => {
       let mx = 0; for (let j = k; j >= 0 && F.t[i] - F.t[cand[j]] < 3000; j--) mx = Math.max(mx, fs[cand[j]]);
       for (let j = k; j < cand.length && F.t[cand[j]] - F.t[i] < 3000; j++) mx = Math.max(mx, fs[cand[j]]);
       if (fs[i] >= 0.4 * mx) { const L = strikes[strikes.length - 1]; if (L && F.t[i] - L.t < 600) { if (fs[i] > fs[L.fi]) strikes[strikes.length - 1] = { t: F.t[i], fi: i, gpk: null, swing: null }; } else strikes.push({ t: F.t[i], fi: i, gpk: null, swing: null }); }
     });
   }
-  const cm = A && A.t.length > 100 ? movMean(magHP(A, 15), 2) : null, cthr = cm ? Math.max(30, 3 * medianSub(cm)) : 0;
+  const cm = A && A.t.length > 100 ? movMean(magHP(A, 15), 2) : null, cthr = 30;
   const inR = d => d >= 600 && d <= 2200;
   /* sicher nur in einer Folge von mindestens vier gleichmäßigen Doppelschritten */
   const run = new Int32Array(strikes.length);
@@ -1986,7 +2009,7 @@ async function buildSpar(D, stamp8) {
   const KR = [["Feld", "Wert"], ["Version", "Messplayer 8"], ["Datei", stamp8], ["Beginn", dstamp(new Date(T0)) + " " + tx(T0)], ["T0_Epoch_ms", Math.round(T0)],
     ["BigData", $("bigdata").checked ? "an" : "aus"], ["Herzschläge", B.length], ["davon im EKG bestätigt", R.length ? al.ok : "kein EKG"],
     ["Versatz Herzschlag-Zeit zu EKG ms", al.lag], ["Klopfgruppen Brust", sync.gc.length], ["Klopfgruppen Fuß", sync.gf.length],
-    ["Abgleich Fuß zu Brust ms", sync.pairs.length ? sync.pairs.map(p => `${tx(p.t)}: ${Math.round(p.off)} (Streuung ${Math.round(p.streu)})`).join(" | ") : "kein Abgleich gefunden"],
+    ["Abgleich Fuß zu Brust ms", sync.pairs.length ? sync.pairs.map(p => `${tx(p.t)}: ${Math.round(p.off)} (${p.n} Klopfer, Ähnlichkeit ${Math.round(p.r * 100) / 100})`).join(" | ") : "kein Abgleich gefunden"],
     ["Drift ms pro Stunde", sync.drift === null ? null : Math.round(sync.drift)], ["Fußzeiten korrigiert", sync.pairs.length ? "ja" : "nein"],
     ["Drehrate Fuß", gyInfo], ["Schritte rechts sicher", nR], ["Schritte links sicher", nL],
     ["Atemzüge Brust sicher", sure.length], ["Atemzüge aus Puls (Schätzung)", breaths.length - sure.length],
@@ -1998,12 +2021,13 @@ async function buildSpar(D, stamp8) {
   const fen = [];
   const cut = (X, a, b, ch) => { if (!X) return []; const o = []; for (let k = lowerBound(X.t, a), e = lowerBound(X.t, b); k < e; k++) { const r = [Math.round((X.t[k] - T0) * 10) / 10]; for (let c = 0; c < ch; c++) r.push(Math.round(X.c[c][k] * 10) / 10); o.push(r); } return o; };
   [...sync.gc.map(g => ["Klopfen Brust", g]), ...sync.gf.map(g => ["Klopfen Fuß", g])].forEach(([art, g]) => {
-    const a = g[0] - 2000, b = g[2] + 2000;
-    fen.push({ art, start_ms: Math.round(a - T0), ende_ms: Math.round(b - T0), spitzen_ms: g.map(x => Math.round((x - T0) * 10) / 10), brust: cut(A, a, b, 3), fuss: cut(F, a, b, 3), drehrate: cut(G, a, b, 3), ekg: cut(E, a, b, 1) });
+    const a = g[0] - 2000, b = g[g.length - 1] + 2000;
+    const a2 = a, b2 = g[g.length - 1] + 2000;
+    fen.push({ art, start_ms: Math.round(a2 - T0), ende_ms: Math.round(b2 - T0), spitzen_ms: g.map(x => Math.round((x - T0) * 10) / 10), brust: cut(A, a2, b2, 3), fuss: cut(F, a2, b2, 3), drehrate: cut(G, a2, b2, 3), ekg: cut(E, a2, b2, 1) });
   });
   const json = JSON.stringify({ version: "Messplayer 8", t0_epoch_ms: Math.round(T0), beginn: dstamp(new Date(T0)) + " " + tx(T0), zeit: "Millisekunden seit t0, Fuß und Drehrate auf Brustuhr korrigiert",
     einheiten: { brust: "mg", fuss: "mg", drehrate: "Grad pro Sekunde", ekg: "Mikrovolt" },
-    abgleich: { paare: sync.pairs.map(p => ({ t_ms: Math.round(p.t - T0), versatz_ms: Math.round(p.off * 10) / 10, streuung_ms: Math.round(p.streu) })), drift_ms_pro_h: sync.drift },
+    abgleich: { methode: "Korrelation der Klopfspuren, Fuß plus Versatz = Brust", paare: sync.pairs.map(p => ({ t_ms: Math.round(p.t - T0), versatz_ms: p.off, aehnlichkeit: Math.round(p.r * 100) / 100, klopfer: p.n })), drift_ms_pro_h: sync.drift },
     herzschlag_ekg_versatz_ms: al.lag, fenster: fen });
   return { xlsx, json, info: `${B.length} Herzschläge, ${nR + nL} Schritte, ${breaths.length} Atemzüge, ${sync.pairs.length} Abgleich` };
 }
