@@ -71,6 +71,7 @@
   <legend>Polar Verity Sense</legend>
   <div class="hint">Einmal kurz drücken und loslassen, nicht halten (Halten schaltet aus). Er startet von selbst mit blauem Licht an der Seite. Warten, bis alle sechs Lämpchen geleuchtet haben, dann verbinden. Polar-App vorher schließen. Am Fuß misst er Bewegung und Drehrate, rechts außen über dem Knöchel. Am Oberarm zusätzlich die Pulswelle, Licht zur Haut, fest anliegend, immer dieselbe Stelle.<br><b>Abgleich:</b> Am Anfang und am Ende den Sense neben den H10 auf den Gurt halten und dreimal mit dem Knöchel auf beide klopfen, etwa im Abstand einer halben Sekunde. Davor und danach zwei Sekunden still halten.</div>
   <label>Trageort: <select id="vplace"><option value="Fuß">Fuß</option><option value="Arm">Oberarm</option></select></label>
+  <label>Rate Bewegung: <select id="vrate"><option value="52">52 Hz (Standard)</option><option value="104">104 Hz</option><option value="208">208 Hz (für die Nacht, genauer Beginn der Zuckung)</option></select></label>
   <label><input type="checkbox" id="usegyro" checked> Am Fuß zusätzlich die Drehrate (Gyroskop) aufzeichnen</label>
   <button class="main" id="vconnect">Sense verbinden</button>
   <button id="vstop" disabled>Sense beenden</button>
@@ -112,6 +113,8 @@
   <div id="order" class="hint"></div>
   <label><input type="checkbox" id="keepon" checked> Unhörbaren Wachhalte-Ton abspielen (hält die Seite bei gesperrtem Bildschirm wach)</label>
   <label><input type="checkbox" id="bigdata" checked> BigData: zusätzlich alle Rohdaten speichern wie bisher (sonst nur Excel und JSON)</label>
+  <label><input type="checkbox" id="nacht"> Nachtmodus: Ereignisse (Zuckungen, Umdrehen) und Fenster in voller Auflösung, dazu Vergleichsfenster alle 10 Minuten</label>
+  <div class="hint">Für die Nacht: Nachtmodus an, BigData aus, Sense am Fuß mit 208 Hz, Thermometer alle 10 Minuten. Abends vor dem Hinlegen und morgens nach dem Aufwachen den Sense neben den Gurt halten und klopfen.</div>
   <div class="hint">Tasten am Sperrbildschirm und Kopfhörer: Halt setzt einen Marker. Vor schaltet die Musik aus und an. Zurück schaltet die Atemhilfe (Töne) aus und an. Jedes Umschalten wird angesagt.</div>
 </fieldset>
 
@@ -1015,7 +1018,7 @@ $("unlockno").addEventListener("click", e => { e.preventDefault(); e.stopPropaga
 ["pointerdown", "pointerup", "click", "touchstart", "touchend"].forEach(ev => $("guard").addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); }, { passive: false }));
 
 /* ================= Fußsensor Polar Verity Sense ================= */
-let vPlace = "Fuß", vP = 0, vPpgSeen = false, vHr = null, lastBpm = null, vDev = null, vCp = null, vData = null, vWanted = false, vRec = null, vLast = 0, vN = 0, vFactor = 0.000244141, vFrameSeen = false, vResp = null, vReconn = false, vListened = null, vG = 0, vGSeen = false, vGFactor = null;
+let vPlace = "Fuß", vP = 0, vPpgSeen = false, vHr = null, lastBpm = null, vDev = null, vCp = null, vData = null, vWanted = false, vRec = null, vLast = 0, vN = 0, vFactor = 0.000244141, vFrameSeen = false, vResp = null, vReconn = false, vListened = null, vG = 0, vGSeen = false, vGFactor = null, vRateNom = 52;
 function vStatus(t) { $("vstatus").textContent = t; }
 /* Delta-Format nach dem Polar BLE SDK: Referenzwert mit 16 bit je Achse, dann Blöcke aus Bitbreite, Anzahl und bitweise gepackten Differenzen */
 function vDelta(b, ch, bytes) {
@@ -1068,7 +1071,7 @@ function onVData(ev) {
   else if (ft === 1) { raw = []; for (let o = 10; o + 5 < v.byteLength; o += 6) raw.push(v.getInt16(o, true), v.getInt16(o + 2, true), v.getInt16(o + 4, true)); }
   else { if (!vFrameSeen) { vFrameSeen = true; addEntry({ typ: "Sense", name: "Unbekanntes Datenformat " + ft + ": " + hexOf(v).slice(0, 80), start: now, session: vRec }); } return; }
   if (!vFrameSeen) { vFrameSeen = true; const m = Math.round(Math.hypot(raw[0], raw[1], raw[2])); addEntry({ typ: "Sense", name: `Erste Daten, Format ${ft}, ${raw.length / 3} Werte im Paket, Betrag ${m} mg`, start: now, session: vRec }); }
-  put("foot", { t: now, us: tsUs, r: 55, s: vRec, w: vPlace, v: raw }); vN += raw.length / 3; vLast = now; tapFeed("f", now, raw, 1000 / 55);
+  put("foot", { t: now, us: tsUs, r: Math.round(vRateNom * 55 / 52), s: vRec, w: vPlace, v: raw }); vN += raw.length / 3; vLast = now; tapFeed("f", now, raw, 52000 / (55 * vRateNom));
 }
 function onVCp(ev) {
   const v = ev.target.value;
@@ -1099,12 +1102,14 @@ async function vAttach() {
   vCp.removeEventListener("characteristicvaluechanged", onVCp); vCp.addEventListener("characteristicvaluechanged", onVCp);
   vData.removeEventListener("characteristicvaluechanged", onVData); vData.addEventListener("characteristicvaluechanged", onVData);
   await vCp.startNotifications(); await vData.startNotifications();
-  const full = [0x02, 0x02, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03];
+  vRateNom = vPlace === "Fuß" ? +$("vrate").value : 52;
+  let full = [0x02, 0x02, 0x00, 0x01, vRateNom & 255, vRateNom >> 8, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03];
   let st = await vSend(full);
+  if (st !== 0 && vRateNom !== 52) { addEntry({ typ: "Sense", name: `Rate ${vRateNom} Hz abgelehnt (Code ${st}), nehme 52 Hz`, start: Date.now(), session: vRec }); vRateNom = 52; full = [0x02, 0x02, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03]; await vSend([0x03, 0x02]); await wait(300); st = await vSend(full); }
   if (st === 6) { await vSend([0x03, 0x02]); await wait(300); st = await vSend(full); }
   if (st !== 0) { const st2 = await vSend(full.slice(0, 14)); if (st2 === 0) st = 0; else if (st2 !== -1) st = st2; }
   if (st !== 0) throw new Error("Start abgelehnt, Code " + st);
-  addEntry({ typ: "Sense", name: "Beschleunigung gestartet, Trageort " + vPlace, start: Date.now(), session: vRec });
+  addEntry({ typ: "Sense", name: "Beschleunigung gestartet, Trageort " + vPlace + ", " + vRateNom + " Hz", start: Date.now(), session: vRec });
   if (vPlace === "Fuß" && $("usegyro").checked) {
     let ok = null, last = null;
     for (const r of [2000, 1000, 500, 250]) {
@@ -1632,7 +1637,17 @@ function peaksAbove(sig, t, thr, minDist) {
   return out;
 }
 /* Rohpakete in eine Zeitreihe auf der Uhr des Handys auflösen */
-function realDtG(arr, i, n, nominal) {
+/* tatsächlicher Abstand je Sitzung aus den Sensorzeiten (Median), falls die Geräterate von der Vorgabe abweicht */
+const dtCache = new WeakMap();
+function sessDt(arr, ch) {
+  let m = dtCache.get(arr); if (m) return m; m = {};
+  const L = {};
+  for (let i = 1; i < arr.length; i++) { const p = arr[i - 1], c = arr[i]; if (p.s !== c.s) continue; const n = c.v.length / (ch || 3); if (n <= 0) continue; const d = (c.us - p.us) / 1000 / n; if (d > 0) (L[c.s] = L[c.s] || []).push(d); }
+  for (const k in L) { const a = L[k].sort((x, y) => x - y); m[k] = a[a.length >> 1]; }
+  dtCache.set(arr, m); return m;
+}
+function realDtG(arr, i, n, nominal, ch) {
+  const md = sessDt(arr, ch)[arr[i].s]; if (md && (md < nominal * 0.75 || md > nominal * 1.25)) nominal = md;
   const p = i > 0 ? arr[i - 1] : null; if (!p || p.s !== arr[i].s || n <= 0) return nominal;
   const d = (arr[i].us - p.us) / 1000 / n;
   return d > nominal * 0.75 && d < nominal * 1.25 ? d : nominal;
@@ -1642,7 +1657,7 @@ function expand(arr, offs, key, ch, scale) {
   const t = new Float64Array(n), c = []; for (let k = 0; k < ch; k++) c.push(new Float32Array(n));
   let j = 0;
   arr.forEach((p, idx) => {
-    const m = Math.floor(p.v.length / ch), dt = realDtG(arr, idx, m, 1000 / p.r);
+    const m = Math.floor(p.v.length / ch), dt = realDtG(arr, idx, m, 1000 / p.r, ch);
     const base = p.us / 1000 + offs[key + (p.s ?? "")], sc = scale ? scale(p) : 1;
     for (let i = 0; i < m; i++, j++) { t[j] = base - (m - 1 - i) * dt; for (let k = 0; k < ch; k++) c[k][j] = p.v[ch * i + k] * sc; }
   });
@@ -1651,6 +1666,12 @@ function expand(arr, offs, key, ch, scale) {
   const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => t[a] - t[b]);
   return { t: Float64Array.from(idx, i => t[i]), c: c.map(a => Float32Array.from(idx, i => a[i])) };
 }
+function rateOf(X) {
+  if (!X || X.t.length < 10) return 55;
+  const n = Math.min(X.t.length - 1, 2000), d = []; for (let i = 1; i <= n; i++) d.push(X.t[i] - X.t[i - 1]);
+  d.sort((a, b) => a - b); const m = d[d.length >> 1]; return m > 0 ? 1000 / m : 55;
+}
+function W(X, sec) { return Math.max(1, Math.round(sec * rateOf(X))); }
 function magOf(X) { const n = X.t.length, m = new Float32Array(n); for (let i = 0; i < n; i++) m[i] = Math.hypot(X.c[0][i], X.c[1][i], X.c[2][i]); return m; }
 function magHP(X, w) { const m = magOf(X), s = movMean(m, w); for (let i = 0; i < m.length; i++) m[i] = Math.abs(m[i] - s[i]); return m; }
 function localHP(X, i, w) {
@@ -1731,9 +1752,9 @@ function envAt(X, hp, t0, t1) { const n = Math.floor((t1 - t0) / 2), o = new Flo
   for (let i = 0; i < n; i++) { const t = t0 + 2 * i; while (j < X.t.length - 2 && X.t[j + 1] < t) j++; const a = X.t[j], b = X.t[j + 1] ?? a, f = b > a ? Math.min(1, Math.max(0, (t - a) / (b - a))) : 0; o[i] = Math.log1p(hp[j] * (1 - f) + (hp[j + 1] ?? hp[j]) * f); } return o; }
 function corr(a, b) { const n = Math.min(a.length, b.length); let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n; let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; } return saa && sbb ? sab / Math.sqrt(saa * sbb) : 0; }
 function tapSync(A, F) {
-  const gc = tapGroups(A, 15, 250), gf = tapGroups(F, 16, 1000), pairs = [];
+  const gc = tapGroups(A, W(A, 0.3), 250), gf = tapGroups(F, W(F, 0.3), 1000), pairs = [];
   if (gc.length && F) {
-    const ha = magHP(A, 15), hf = magHP(F, 16);
+    const ha = magHP(A, W(A, 0.3)), hf = magHP(F, W(F, 0.3));
     gc.forEach(c => {
       const t0 = c[0] - 300, t1 = c[c.length - 1] + 300, ce = envAt(A, ha, t0, t1); let best = { off: 0, r: -1 };
       for (let off = -500; off <= 500; off += 2) { const r = corr(ce, envAt(F, hf, t0 - off, t1 - off)); if (r > best.r) best = { off, r }; }
@@ -1749,7 +1770,7 @@ function tapSync(A, F) {
 /* Schritte: rechts aus dem Fuß (Schwung über die Drehrate, sonst Aufprall), links aus dem Stoß an der Brust zwischen zwei rechten */
 function stepsDetect(F, G, A) {
   const out = []; if (!F || F.t.length < 200) return out;
-  const fm = magHP(F, 22), strikes = [];
+  const fm = magHP(F, W(F, 0.4)), strikes = [], w4 = Math.max(2, W(F, 0.04));
   if (G && G.t.length > 200) {
     const gm = magOf(G), gs = movMean(gm, 3), cand = peaksAbove(gs, G.t, 80, 600);
     /* Schwung des eigenen Beins: Spitze über 40 Prozent der stärksten in 3 s Umgebung */
@@ -1763,14 +1784,14 @@ function stepsDetect(F, G, A) {
     });
   } else {
     /* eigener Aufprall ist am Knöchel stark, der Schritt des anderen Fußes nur schwach: relativ zum stärksten Ausschlag in 3 s Umgebung */
-    const fs = movMean(fm, 2), cand = peaksAbove(fs, F.t, 150, 300);
+    const fs = movMean(fm, w4), cand = peaksAbove(fs, F.t, 150, 300);
     cand.forEach((i, k) => {
       let mx = 0; for (let j = k; j >= 0 && F.t[i] - F.t[cand[j]] < 3000; j--) mx = Math.max(mx, fs[cand[j]]);
       for (let j = k; j < cand.length && F.t[cand[j]] - F.t[i] < 3000; j++) mx = Math.max(mx, fs[cand[j]]);
       if (fs[i] >= 0.4 * mx) { const L = strikes[strikes.length - 1]; if (L && F.t[i] - L.t < 600) { if (fs[i] > fs[L.fi]) strikes[strikes.length - 1] = { t: F.t[i], fi: i, gpk: null, swing: null }; } else strikes.push({ t: F.t[i], fi: i, gpk: null, swing: null }); }
     });
   }
-  const cm = A && A.t.length > 100 ? movMean(magHP(A, 15), 2) : null, cthr = 30;
+  const cm = A && A.t.length > 100 ? movMean(magHP(A, W(A, 0.3)), Math.max(2, W(A, 0.04))) : null, cthr = 30;
   const inR = d => d >= 600 && d <= 2200;
   /* sicher nur in einer Folge von mindestens vier gleichmäßigen Doppelschritten */
   const run = new Int32Array(strikes.length);
@@ -1782,12 +1803,12 @@ function stepsDetect(F, G, A) {
     const nx = strikes[k + 1], I = nx ? nx.t - R.t : 0;
     const walk = run[k] >= 5;
     const fi = Math.min(R.fi, F.t.length - 1);
-    let sp = 0; for (let j = Math.max(0, fi - 3); j <= Math.min(fm.length - 1, fi + 3); j++) sp = Math.max(sp, fm[j]);
-    out.push({ t: R.t, side: "R", spitze: Math.round(sp), vec: localHP(F, fi, 11), gyro: R.gpk, swing: R.swing, brust: null, sicher: walk });
+    const w6 = W(F, 0.06); let sp = 0; for (let j = Math.max(0, fi - w6); j <= Math.min(fm.length - 1, fi + w6); j++) sp = Math.max(sp, fm[j]);
+    out.push({ t: R.t, side: "R", spitze: Math.round(sp), vec: localHP(F, fi, W(F, 0.2)), gyro: R.gpk, swing: R.swing, brust: null, sicher: walk });
     if (nx && inR(I) && cm) {
       let bi = -1;
       for (let j = lowerBound(A.t, R.t + 0.3 * I), hi = lowerBound(A.t, R.t + 0.7 * I); j < hi; j++) if (bi < 0 || cm[j] > cm[bi]) bi = j;
-      if (bi >= 0 && cm[bi] > cthr) out.push({ t: A.t[bi], side: "L", spitze: null, vec: localHP(A, bi, 8), gyro: null, swing: null, brust: Math.round(cm[bi]), sicher: walk });
+      if (bi >= 0 && cm[bi] > cthr) out.push({ t: A.t[bi], side: "L", spitze: null, vec: localHP(A, bi, W(A, 0.16)), gyro: null, swing: null, brust: Math.round(cm[bi]), sicher: walk });
       else out.push({ t: R.t + I / 2, side: "L", spitze: null, vec: null, gyro: null, swing: null, brust: null, sicher: false });
     }
   });
@@ -1826,7 +1847,7 @@ function breathsChest(A) {
   if (!A || A.t.length < 1500) return res;
   const t = A.t, n = t.length, t0 = t[0], nb = Math.ceil((t[n - 1] - t0) / 100) + 1;
   const S = [new Float64Array(nb), new Float64Array(nb), new Float64Array(nb)], cnt = new Int32Array(nb), gap = new Uint8Array(nb);
-  const mhp = magHP(A, 25), mov = new Float64Array(nb);
+  const mhp = magHP(A, W(A, 0.5)), mov = new Float64Array(nb);
   for (let i = 0; i < n; i++) { const k = Math.floor((t[i] - t0) / 100); for (let a = 0; a < 3; a++) S[a][k] += A.c[a][i]; mov[k] += mhp[i]; cnt[k]++; }
   for (let k = 0; k < nb; k++) { if (cnt[k]) { for (let a = 0; a < 3; a++) S[a][k] /= cnt[k]; mov[k] /= cnt[k]; } else { gap[k] = 1; for (let a = 0; a < 3; a++) S[a][k] = k ? S[a][k - 1] : 0; mov[k] = 999; } }
   const Fl = S.map(a => { const f = movMean(a, 10), sl = movMean(a, 200); return Float32Array.from(f, (v, i) => v - sl[i]); });
@@ -1923,10 +1944,76 @@ async function makeZip8(files) {
   return new Blob([...parts, ...central, e.buffer], { type: "application/zip" });
 }
 
+/* ================= Nachtmodus: Ereignisse und Fenster ================= */
+function nightEvents(F, A, G, B, R, steps, fhp, zthr, T0) {
+  const ev = [], stepT = Float64Array.from(steps.filter(s => s.sicher), s => s.t);
+  const nearStep = t => { const k = lowerBound(stepT, t - 3000); return k < stepT.length && stepT[k] < t + 3000; };
+  /* Fußzuckungen: Spitze über der Schwelle, mindestens 8 s Abstand, Beginn rückwärts gesucht */
+  if (F && fhp) {
+    const pk = peaksAbove(fhp, F.t, zthr, 8000);
+    pk.forEach(i => {
+      const tp = F.t[i]; if (nearStep(tp)) return;
+      const lo = lowerBound(F.t, tp - 3000), hi = lowerBound(F.t, tp - 1000), q = [];
+      for (let k = lo; k < hi; k++) q.push(fhp[k]); q.sort((a, b) => a - b);
+      const base = q.length ? q[q.length >> 1] : 0, lim = Math.max(3 * base, 10);
+      let j = i; while (j > 0 && F.t[i] - F.t[j - 1] < 1000 && fhp[j - 1] > lim) j--;
+      ev.push({ art: "Zuckung", t: F.t[j], tPk: tp, fuss: fhp[i] });
+    });
+  }
+  /* starke Brustbewegung (Umdrehen, Husten), wenn keine Zuckung in der Nähe */
+  if (A) {
+    const ch = magHP(A, W(A, 0.5)), pk = peaksAbove(ch, A.t, 300, 30000);
+    pk.forEach(i => { const t = A.t[i]; if (ev.some(e => Math.abs(e.t - t) < 5000) || nearStep(t)) return; ev.push({ art: "Brust", t, tPk: t, fuss: null }); });
+  }
+  ev.sort((a, b) => a.t - b.t);
+  /* Werte um jedes Ereignis */
+  const chp = A ? magHP(A, W(A, 0.3)) : null, gm = G ? magOf(G) : null;
+  const maxIn = (X, h, a, b) => { if (!X) return null; let m = null; for (let k = lowerBound(X.t, a), e = lowerBound(X.t, b); k < e; k++) if (m === null || h[k] > m) m = h[k]; return m; };
+  const bt = Float64Array.from(B, b => b.tt), hrOf = k => { const b = B[k]; const rr = b.rre || b.rr; return 60000 / rr; };
+  ev.forEach((e, n) => {
+    e.nr = n + 1;
+    e.brust = maxIn(A, chp, e.t - 1000, e.t + 1000); e.dreh = maxIn(G, gm, e.t - 1000, e.t + 1000);
+    const kR = lowerBound(R, e.t); e.vorR = kR > 0 ? e.t - R[kR - 1] : null; e.nachR = kR < R.length ? R[kR] - e.t : null;
+    const k0 = lowerBound(bt, e.t);   /* Schlag 0 endet mit der ersten R-Zacke nach dem Beginn */
+    if (k0 >= 5 && k0 + 10 < B.length && B[k0 + 10].tt - B[k0 - 5].tt < 30000) {
+      const base = [-5, -4, -3, -2].map(d => hrOf(k0 + d)).reduce((a, c) => a + c, 0) / 4;
+      let pv = -1e9, pk = 0, tv = 1e9, tk = 0;
+      for (let d = 0; d <= 4; d++) { const h = hrOf(k0 + d); if (h > pv) { pv = h; pk = d; } }
+      for (let d = 5; d <= 10; d++) { const h = hrOf(k0 + d); if (h < tv) { tv = h; tk = d; } }
+      Object.assign(e, { base, pv, pk, tv, tk });
+    }
+  });
+  /* Fenster: 15 s davor bis 35 s danach, überlappende zusammengefasst */
+  const win = [];
+  ev.forEach(e => {
+    const a = e.t - 15000, b = e.t + 35000, L = win[win.length - 1];
+    if (L && a <= L.b) { L.b = Math.max(L.b, b); L.ev.push(e.nr); L.arten.add(e.art); } else win.push({ a, b, ev: [e.nr], arten: new Set([e.art]) });
+  });
+  /* Vergleichsfenster alle 10 Minuten, wo 60 s um den Punkt nichts los ist */
+  const first = Math.min(...[A?.t[0], F?.t[0]].filter(Number.isFinite)), last = Math.max(...[A?.t[A.t.length - 1], F?.t[F.t.length - 1]].filter(Number.isFinite));
+  const ctrl = [];
+  if (Number.isFinite(first)) for (let c = first + 600000; c < last - 60000; c += 600000) {
+    for (let s = 0; s < 6; s++) { const x = c + s * 60000; if (!ev.some(e => Math.abs(e.t - x) < 60000) && !win.some(w => x + 35000 > w.a && x - 15000 < w.b)) { ctrl.push({ a: x - 15000, b: x + 35000, ev: [], arten: new Set(["Vergleich"]) }); break; } }
+  }
+  const all = [...win, ...ctrl].sort((x, y) => x.a - y.a);
+  all.forEach((w, i) => { w.nr = i + 1; w.ev.forEach(n => { ev[n - 1].fenster = w.nr; }); });
+  return { ev, win: all };
+}
+
+/* Fenster spaltenweise: Zeit in ms seit t0 (0,1 ms), Werte gerundet */
+function nightJson(NE, A, F, G, E, R, T0) {
+  const col = (X, a, b, ch, dec) => { if (!X) return null; const lo = lowerBound(X.t, a), hi = lowerBound(X.t, b), f = 10 ** dec, o = { t: [] }; for (let c = 0; c < ch; c++) o["k" + c] = [];
+    for (let k = lo; k < hi; k++) { o.t.push(Math.round((X.t[k] - T0) * 10) / 10); for (let c = 0; c < ch; c++) o["k" + c].push(Math.round(X.c[c][k] * f) / f); } return o; };
+  const ren = (o, names) => { if (!o) return null; const r = { t: o.t }; names.forEach((n, i) => r[n] = o["k" + i]); return r; };
+  return { hinweis: "Fenster 15 s vor bis 35 s nach jedem Ereignis, überlappende zusammengefasst, dazu Vergleichsfenster alle 10 Minuten. Spalten t in ms seit t0.",
+    fenster: NE.win.map(w => ({ nr: w.nr, arten: [...w.arten], ereignisse: w.ev, start_ms: Math.round(w.a - T0), ende_ms: Math.round(w.b - T0),
+      r_zacken_ms: R.filter(x => x >= w.a && x < w.b).map(x => Math.round((x - T0) * 10) / 10),
+      brust: ren(col(A, w.a, w.b, 3, 0), ["x", "y", "z"]), fuss: ren(col(F, w.a, w.b, 3, 0), ["x", "y", "z"]), drehrate: ren(col(G, w.a, w.b, 3, 1), ["x", "y", "z"]), ekg: ren(col(E, w.a, w.b, 1, 0), ["uV"]) })) };
+}
 /* ================= Sparmodus: alles auf Herzschläge umbrechen ================= */
 async function buildSpar(D, stamp8) {
   const say2 = t => { $("savestatus").textContent = t; };
-  const { L, BT, AC, EC, SY, AT, TP, FT, FA, GY, offs } = D;
+  const { L, BT, AC, EC, SY, AT, TP, FT, FA, GY, offs, nacht } = D;
   say2("Rechne: Zeitreihen …"); await wait(20);
   const A = AC.length ? expand(AC, offs, "a", 3) : null;
   const E = EC.length ? expand(EC, offs, "e", 1) : null;
@@ -1956,12 +2043,12 @@ async function buildSpar(D, stamp8) {
   const sure = bc.list.filter(c => c.sicher);
   const breaths = [...bc.list.filter(c => c.sicher), ...bp.filter(p => !sure.some(c => p.t < c.tEnd && p.tEnd > c.t))].sort((a, b) => a.t - b.t);
   say2("Rechne: Zeilen je Herzschlag …"); await wait(20);
-  const fhp = F ? magHP(F, 22) : null, chp = A ? magHP(A, 25) : null;
+  const fhp = F ? magHP(F, W(F, 0.4)) : null, chp = A ? magHP(A, W(A, 0.5)) : null;
   const zthr = fhp ? Math.max(40, 8 * medianSub(fhp)) : Infinity;
   const gmag = G ? magOf(G) : null;
   const ev = [...L].sort((a, b) => a.start - b.start), pieces = ev.filter(r => r.typ === "Stück");
   const TPs = [...TP].sort((a, b) => a.t - b.t), ATs = [...AT].sort((a, b) => a.t - b.t);
-  const stepT = Float64Array.from(steps, s => s.t), brT = Float64Array.from(breaths, s => s.t);
+  const stepT = Float64Array.from(steps, s => s.t), sureT = Float64Array.from(steps.filter(s => s.sicher), s => s.t), brT = Float64Array.from(breaths, s => s.t);
   const tx = ms => stamp(new Date(ms));
   const H = ["Nr", "Uhrzeit", "t_s", "RR_ms", "Puls", "EKG_bestaetigt", "RR_EKG_ms", "Brust_x_mg", "Brust_y_mg", "Brust_z_mg", "Brust_Bewegung_mg", "Atemwert_mg", "Atemphase", "Fuss_x_mg", "Fuss_y_mg", "Fuss_z_mg", "Fuss_Bewegung_mg", "Fuss_Spitze_mg", "Fuss_Drehrate_max_dps", "Zuckung", "Schritt_Nr", "Schritt_Seite", "Temperatur_C", "Luftfeuchte_Prozent", "Stueck", "Block", "Position", "Abspielposition_s", "Atemhilfe_Phase", "Lautstaerke_dB", "Taetigkeit", "Testabschnitt", "Marker", "Notiz", "Epoch_ms"];
   const rows = [H];
@@ -1984,7 +2071,7 @@ async function buildSpar(D, stamp8) {
     if (bc.bt.length) { const k = lowerBound(bc.bt, t); if (k < bc.bt.length && Math.abs(bc.bt[k] - t) < 200) aw = bc.bs[k]; }
     const wf = win(F, t, t1);
     if (wf) { let sx = 0, sy = 0, sz = 0, sm = 0, mx = 0; const n = wf[1] - wf[0]; for (let k = wf[0]; k < wf[1]; k++) { sx += F.c[0][k]; sy += F.c[1][k]; sz += F.c[2][k]; sm += fhp[k]; if (fhp[k] > mx) mx = fhp[k]; } fx = sx / n; fy = sy / n; fz = sz / n; fmv = sm / n; fpk = mx;
-      if (mx > zthr) { const k = lowerBound(stepT, t - 3000); zuck = !(k < stepT.length && stepT[k] < t1 + 3000) ? "ja" : null; } }
+      if (mx > zthr) { const k = lowerBound(sureT, t - 3000); zuck = !(k < sureT.length && sureT[k] < t1 + 3000) ? "ja" : null; } }
     const wg = win(G, t, t1);
     if (wg) { let mx = 0; for (let k = wg[0]; k < wg[1]; k++) if (gmag[k] > mx) mx = gmag[k]; gpk = mx; }
     let sn = null, ss = null; { const k = lowerBound(stepT, t1) - 1; if (k >= 0 && t - stepT[k] < 2500) { sn = k + 1; ss = steps[k].side; } }
@@ -2017,8 +2104,20 @@ async function buildSpar(D, stamp8) {
     ["Atemzüge Brust sicher", sure.length], ["Atemzüge aus Puls (Schätzung)", breaths.length - sure.length],
     ["Schwelle Zuckung mg", Number.isFinite(zthr) ? Math.round(zthr) : null], ["Zuckungen (Ereignisse, mindestens 8 s Abstand)", nZ],
     ["Hinweis", "Leere Zelle heißt: nicht sicher erkannt. Zeiten der Herzschläge liegen auf der R-Zacke, wenn EKG bestätigt. Einatmen ist der steigende Teil."]];
+  let NE = null;
+  if (nacht) {
+    say2("Rechne: Ereignisse der Nacht …"); await wait(20);
+    NE = nightEvents(F, A, G, B, R, steps, fhp, zthr, T0);
+    const r1 = x => x === null || x === undefined ? null : Math.round(x * 10) / 10;
+    var ER = [["Nr", "Art", "Uhrzeit_Beginn", "t_s", "Uhrzeit_Spitze", "Fuss_Spitze_mg", "Brust_Spitze_mg", "Drehrate_Spitze_dps", "Beginn_nach_letzter_R_ms", "Beginn_vor_naechster_R_ms", "Puls_vorher", "Puls_Spitze", "Spitze_bei_Schlag", "Ausschlag", "Puls_Tief", "Tief_bei_Schlag", "Unterschwingen", "Fenster_Nr", "Epoch_ms"]];
+    NE.ev.forEach(e => ER.push([e.nr, e.art, tx(e.t), (e.t - T0) / 1000, tx(e.tPk), r1(e.fuss), r1(e.brust), r1(e.dreh), r1(e.vorR), r1(e.nachR), r1(e.base), r1(e.pv), e.pk ?? null, e.base ? r1(e.pv - e.base) : null, r1(e.tv), e.tk ?? null, e.base ? r1(e.tv - e.base) : null, e.fenster ?? null, Math.round(e.t)]));
+    KR.splice(KR.length - 1, 0, ["Nachtmodus", "an"], ["Ereignisse Zuckung", NE.ev.filter(e => e.art === "Zuckung").length], ["Ereignisse Brust", NE.ev.filter(e => e.art === "Brust").length], ["Fenster (mit Vergleich)", NE.win.length], ["Fenster Dauer gesamt min", Math.round(NE.win.reduce((a, w) => a + (w.b - w.a), 0) / 60000)], ["Rate Fuß Hz", F ? Math.round(rateOf(F)) : null], ["Rate Brust Hz", A ? Math.round(rateOf(A)) : null]);
+  }
   say2("Schreibe Excel …"); await wait(20);
-  const xlsx = await makeXlsx([{ name: "Herzschläge", rows }, { name: "Schritte", rows: SR }, { name: "Atemzüge", rows: AR }, { name: "Protokoll", rows: PR }, { name: "Kopf", rows: KR }]);
+  const sheets = [{ name: "Herzschläge", rows }, { name: "Schritte", rows: SR }, { name: "Atemzüge", rows: AR }];
+  if (NE) sheets.push({ name: "Ereignisse", rows: ER });
+  sheets.push({ name: "Protokoll", rows: PR }, { name: "Kopf", rows: KR });
+  const xlsx = await makeXlsx(sheets);
   /* JSON: Kopf, Abgleich und die Fenster in voller Auflösung um jedes Klopfen */
   const fen = [];
   const cut = (X, a, b, ch) => { if (!X) return []; const o = []; for (let k = lowerBound(X.t, a), e = lowerBound(X.t, b); k < e; k++) { const r = [Math.round((X.t[k] - T0) * 10) / 10]; for (let c = 0; c < ch; c++) r.push(Math.round(X.c[c][k] * 10) / 10); o.push(r); } return o; };
@@ -2030,8 +2129,8 @@ async function buildSpar(D, stamp8) {
   const json = JSON.stringify({ version: "Messplayer 8", t0_epoch_ms: Math.round(T0), beginn: dstamp(new Date(T0)) + " " + tx(T0), zeit: "Millisekunden seit t0, Fuß und Drehrate auf Brustuhr korrigiert",
     einheiten: { brust: "mg", fuss: "mg", drehrate: "Grad pro Sekunde", ekg: "Mikrovolt" },
     abgleich: { methode: "Korrelation der Klopfspuren, Fuß plus Versatz = Brust", paare: sync.pairs.map(p => ({ t_ms: Math.round(p.t - T0), versatz_ms: p.off, aehnlichkeit: Math.round(p.r * 100) / 100, klopfer: p.n })), drift_ms_pro_h: sync.drift },
-    herzschlag_ekg_versatz_ms: al.lag, fenster: fen });
-  return { xlsx, json, info: `${B.length} Herzschläge, ${nR + nL} Schritte, ${breaths.length} Atemzüge, ${sync.pairs.length} Abgleich` };
+    herzschlag_ekg_versatz_ms: al.lag, fenster: fen, nacht: NE ? nightJson(NE, A, F, G, E, R, T0) : null });
+  return { xlsx, json, info: `${B.length} Herzschläge, ${nR + nL} Schritte, ${breaths.length} Atemzüge, ${sync.pairs.length} Abgleich` + (NE ? `, ${NE.ev.length} Ereignisse, ${NE.win.length} Fenster` : "") };
 }
 
 /* ================= Export als ZIP ================= */
@@ -2085,6 +2184,7 @@ async function buildZip() {
   [["a", AC], ["e", EC], ["f", FT0.concat(PP, GY)]].forEach(([kind, arr]) => arr.forEach(c => { const o = c.t - c.us / 1000; const k = kind + (c.s ?? ""); if (offs[k] === undefined || o < offs[k]) offs[k] = o; }));
   /* Tatsächlicher Abstand der Werte aus den Zeitstempeln aufeinanderfolgender Pakete statt der Nennrate */
   const realDt = (arr, i, n, nominal) => {
+    const md = sessDt(arr, arr === EC ? 1 : arr === PP ? 4 : 3)[arr[i].s]; if (md && (md < nominal * 0.75 || md > nominal * 1.25)) nominal = md;
     const p = i > 0 ? arr[i - 1] : null; if (!p || p.s !== arr[i].s || n <= 0) return nominal;
     const d = (arr[i].us - p.us) / 1000 / n;
     return d > nominal * 0.75 && d < nominal * 1.25 ? d : nominal;
@@ -2150,7 +2250,7 @@ async function buildZip() {
   const id = idstamp(new Date()), enc = new TextEncoder();
   const out = files.map(f => ({ name: f.name, data: enc.encode("\uFEFF" + f.text) }));
   try {
-    const sp = await buildSpar({ L, BT, AC, EC, SY, AT, TP, FT: FT0.filter(c => (c.w || "Fuß") === "Fuß"), FA: FT0, GY, offs }, id);
+    const sp = await buildSpar({ L, BT, AC, EC, SY, AT, TP, FT: FT0.filter(c => (c.w || "Fuß") === "Fuß"), FA: FT0, GY, offs, nacht: $("nacht").checked }, id);
     out.unshift({ name: "Messung8_" + id + ".xlsx", data: sp.xlsx }, { name: "Fenster8_" + id + ".json", data: enc.encode(sp.json) });
     addEntry({ typ: "Daten", name: "Sparmodus: " + sp.info, start: Date.now() });
   } catch (e) {
@@ -2206,6 +2306,7 @@ $("clear").addEventListener("click", async () => {
     log = await readKind("log"); log.slice(-300).forEach(row);
     for (const k of Object.keys(counts)) counts[k] = await countKind(k);
   } catch (e) { $("mem").textContent = "Gerätespeicher nicht verfügbar: " + (e.message || e); }
+  try { for (const [k, id] of [["messplayer_nacht", "nacht"]]) { const v = localStorage.getItem(k); if (v !== null) $(id).checked = v === "1"; $(id).addEventListener("change", () => { try { localStorage.setItem(k, $(id).checked ? "1" : "0"); } catch (e) {} addEntry({ typ: "Daten", name: "Nachtmodus " + ($(id).checked ? "an" : "aus"), start: Date.now() }); }); } const vr = localStorage.getItem("messplayer_vrate"); if (vr) $("vrate").value = vr; $("vrate").addEventListener("change", () => { try { localStorage.setItem("messplayer_vrate", $("vrate").value); } catch (e) {} }); } catch (e) {}
   try { const bd = localStorage.getItem('messplayer_bigdata'); if (bd !== null) $("bigdata").checked = bd === '1'; } catch (e) {}
   $("bigdata").addEventListener("change", () => { try { localStorage.setItem('messplayer_bigdata', $("bigdata").checked ? '1' : '0'); } catch (e) {} addEntry({ typ: "Daten", name: "BigData " + ($("bigdata").checked ? "an" : "aus"), start: Date.now() }); });
   memStatus(); showOrder(); renderReview(); listMics(); crashCheck(); masterShow(); testShow();
