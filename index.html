@@ -1068,7 +1068,7 @@ function onVData(ev) {
   else if (ft === 1) { raw = []; for (let o = 10; o + 5 < v.byteLength; o += 6) raw.push(v.getInt16(o, true), v.getInt16(o + 2, true), v.getInt16(o + 4, true)); }
   else { if (!vFrameSeen) { vFrameSeen = true; addEntry({ typ: "Sense", name: "Unbekanntes Datenformat " + ft + ": " + hexOf(v).slice(0, 80), start: now, session: vRec }); } return; }
   if (!vFrameSeen) { vFrameSeen = true; const m = Math.round(Math.hypot(raw[0], raw[1], raw[2])); addEntry({ typ: "Sense", name: `Erste Daten, Format ${ft}, ${raw.length / 3} Werte im Paket, Betrag ${m} mg`, start: now, session: vRec }); }
-  put("foot", { t: now, us: tsUs, r: 55, s: vRec, w: vPlace, v: raw }); vN += raw.length / 3; vLast = now; if (vPlace === "Fuß") tapFeed("f", now, raw, 1000 / 55);
+  put("foot", { t: now, us: tsUs, r: 55, s: vRec, w: vPlace, v: raw }); vN += raw.length / 3; vLast = now; tapFeed("f", now, raw, 1000 / 55);
 }
 function onVCp(ev) {
   const v = ev.target.value;
@@ -1926,14 +1926,16 @@ async function makeZip8(files) {
 /* ================= Sparmodus: alles auf Herzschläge umbrechen ================= */
 async function buildSpar(D, stamp8) {
   const say2 = t => { $("savestatus").textContent = t; };
-  const { L, BT, AC, EC, SY, AT, TP, FT, GY, offs } = D;
+  const { L, BT, AC, EC, SY, AT, TP, FT, FA, GY, offs } = D;
   say2("Rechne: Zeitreihen …"); await wait(20);
   const A = AC.length ? expand(AC, offs, "a", 3) : null;
   const E = EC.length ? expand(EC, offs, "e", 1) : null;
   const F = FT.length ? expand(FT, offs, "f", 3, p => p.r === 52 ? 4.096 : 1) : null;
   const G = GY.length ? expand(GY, offs, "f", 3, p => p.f || 1) : null;
   say2("Rechne: Klopfabgleich …"); await wait(20);
-  const sync = A && F ? tapSync(A, F) : { gc: [], gf: [], pairs: [], fn: () => 0, drift: null };
+  /* Abgleich mit allen Sense-Daten, egal ob am Fuß oder am Arm getragen: es ist dieselbe Uhr */
+  const SA = FA && FA.length ? expand(FA, offs, "f", 3, p => p.r === 52 ? 4.096 : 1) : F;
+  const sync = A && SA ? tapSync(A, SA) : { gc: [], gf: [], pairs: [], fn: () => 0, drift: null };
   if (sync.pairs.length) { if (F) for (let i = 0; i < F.t.length; i++) F.t[i] += sync.fn(F.t[i]); if (G) for (let i = 0; i < G.t.length; i++) G.t[i] += sync.fn(G.t[i]); }
   say2("Rechne: Herzschläge und EKG …"); await wait(20);
   const B = BT.map(b => ({ t: b[0], rr: b[1] })).sort((a, b) => a.t - b.t).filter((b, i, a) => !i || b.t - a[i - 1].t > 200);
@@ -2008,9 +2010,9 @@ async function buildSpar(D, stamp8) {
   const gyInfo = GY.length ? `${GY.length} Pakete, Format ${GY[0].ft}, Faktor ${GY[0].fo ?? "keiner"}` : "keine";
   const KR = [["Feld", "Wert"], ["Version", "Messplayer 8"], ["Datei", stamp8], ["Beginn", dstamp(new Date(T0)) + " " + tx(T0)], ["T0_Epoch_ms", Math.round(T0)],
     ["BigData", $("bigdata").checked ? "an" : "aus"], ["Herzschläge", B.length], ["davon im EKG bestätigt", R.length ? al.ok : "kein EKG"],
-    ["Versatz Herzschlag-Zeit zu EKG ms", al.lag], ["Klopfgruppen Brust", sync.gc.length], ["Klopfgruppen Fuß", sync.gf.length],
-    ["Abgleich Fuß zu Brust ms", sync.pairs.length ? sync.pairs.map(p => `${tx(p.t)}: ${Math.round(p.off)} (${p.n} Klopfer, Ähnlichkeit ${Math.round(p.r * 100) / 100})`).join(" | ") : "kein Abgleich gefunden"],
-    ["Drift ms pro Stunde", sync.drift === null ? null : Math.round(sync.drift)], ["Fußzeiten korrigiert", sync.pairs.length ? "ja" : "nein"],
+    ["Versatz Herzschlag-Zeit zu EKG ms", al.lag], ["Klopfgruppen Brust", sync.gc.length], ["Klopfgruppen Sense", sync.gf.length],
+    ["Abgleich Sense zu Brust ms", sync.pairs.length ? sync.pairs.map(p => `${tx(p.t)}: ${Math.round(p.off)} (${p.n} Klopfer, Ähnlichkeit ${Math.round(p.r * 100) / 100})`).join(" | ") : "kein Abgleich gefunden"],
+    ["Drift ms pro Stunde", sync.drift === null ? null : Math.round(sync.drift)], ["Sense-Zeiten korrigiert", sync.pairs.length ? "ja" : "nein"],
     ["Drehrate Fuß", gyInfo], ["Schritte rechts sicher", nR], ["Schritte links sicher", nL],
     ["Atemzüge Brust sicher", sure.length], ["Atemzüge aus Puls (Schätzung)", breaths.length - sure.length],
     ["Schwelle Zuckung mg", Number.isFinite(zthr) ? Math.round(zthr) : null], ["Zuckungen (Ereignisse, mindestens 8 s Abstand)", nZ],
@@ -2020,7 +2022,7 @@ async function buildSpar(D, stamp8) {
   /* JSON: Kopf, Abgleich und die Fenster in voller Auflösung um jedes Klopfen */
   const fen = [];
   const cut = (X, a, b, ch) => { if (!X) return []; const o = []; for (let k = lowerBound(X.t, a), e = lowerBound(X.t, b); k < e; k++) { const r = [Math.round((X.t[k] - T0) * 10) / 10]; for (let c = 0; c < ch; c++) r.push(Math.round(X.c[c][k] * 10) / 10); o.push(r); } return o; };
-  [...sync.gc.map(g => ["Klopfen Brust", g]), ...sync.gf.map(g => ["Klopfen Fuß", g])].forEach(([art, g]) => {
+  [...sync.gc.map(g => ["Klopfen Brust", g]), ...sync.gf.map(g => ["Klopfen Sense", g])].forEach(([art, g]) => {
     const a = g[0] - 2000, b = g[g.length - 1] + 2000;
     const a2 = a, b2 = g[g.length - 1] + 2000;
     fen.push({ art, start_ms: Math.round(a2 - T0), ende_ms: Math.round(b2 - T0), spitzen_ms: g.map(x => Math.round((x - T0) * 10) / 10), brust: cut(A, a2, b2, 3), fuss: cut(F, a2, b2, 3), drehrate: cut(G, a2, b2, 3), ekg: cut(E, a2, b2, 1) });
@@ -2148,7 +2150,7 @@ async function buildZip() {
   const id = idstamp(new Date()), enc = new TextEncoder();
   const out = files.map(f => ({ name: f.name, data: enc.encode("\uFEFF" + f.text) }));
   try {
-    const sp = await buildSpar({ L, BT, AC, EC, SY, AT, TP, FT: FT0.filter(c => (c.w || "Fuß") === "Fuß"), GY, offs }, id);
+    const sp = await buildSpar({ L, BT, AC, EC, SY, AT, TP, FT: FT0.filter(c => (c.w || "Fuß") === "Fuß"), FA: FT0, GY, offs }, id);
     out.unshift({ name: "Messung8_" + id + ".xlsx", data: sp.xlsx }, { name: "Fenster8_" + id + ".json", data: enc.encode(sp.json) });
     addEntry({ typ: "Daten", name: "Sparmodus: " + sp.info, start: Date.now() });
   } catch (e) {
