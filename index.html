@@ -615,7 +615,7 @@ function onPmd(ev) {
     else if (ft === 1) for (let o = 10; o + 5 < v.byteLength; o += 6) out.push(v.getInt16(o, true), v.getInt16(o + 2, true), v.getInt16(o + 4, true));
     else if (ft === 2) for (let o = 10; o + 8 < v.byteLength; o += 9) out.push(i24(v, o), i24(v, o + 3), i24(v, o + 6));
     else { if (!pmdWarned["a" + ft]) { pmdWarned["a" + ft] = 1; addEntry({ typ: "Gurt", name: "Unbekanntes ACC-Format " + ft, start: now }); } return; }
-    put("acc", { t: now, us: tsUs, r: rate, s: hrRec, v: out }); accN += out.length / 3; tapFeed("c", now, out, 1000 / rate);
+    put("acc", { t: now, us: tsUs, r: rate, s: hrRec, v: out }); accN += out.length / 3; tapFeed("c", now, out, 1000 / rate); memAccPush(now, out, 1000 / rate);
     const n = out.length / 3, dt = 1000 / rate;
     for (let i = 0; i < n; i++) {
       const ti = now - (n - 1 - i) * dt;
@@ -1076,6 +1076,14 @@ function onVData(ev) {
 function onVCp(ev) {
   const v = ev.target.value;
   if (v.getUint8(0) !== 0xF0 || v.byteLength < 4) return;
+  if (v.getUint8(1) === 1 || v.getUint8(1) === 3) {
+    const status = v.getUint8(3);
+    if (v.getUint8(1) === 1 && status === 0) { vSet = {}; const size = { 0: 2, 1: 2, 2: 2, 3: 4, 4: 1, 5: 4 };
+      for (let o = 5; o + 2 <= v.byteLength;) { const t = v.getUint8(o), c = v.getUint8(o + 1), w = size[t]; if (!w || o + 2 + c * w > v.byteLength) break;
+        vSet[t] = []; for (let k = 0; k < c; k++) vSet[t].push(w === 1 ? v.getUint8(o + 2 + k) : w === 2 ? v.getUint16(o + 2 + 2 * k, true) : v.getFloat32(o + 2 + 4 * k, true)); o += 2 + c * w; } }
+    if (vResp) { const r = vResp; vResp = null; r(status); }
+    return;
+  }
   if (v.getUint8(1) === 2) {
     const status = v.getUint8(3);
     if (status === 0) { /* Parameter ab Byte 5, Faktor ist Typ 5 mit 4 Byte */
@@ -1089,6 +1097,8 @@ function onVCp(ev) {
     if (vResp) { const r = vResp; vResp = null; r(status); }
   }
 }
+let vSet = null;
+async function vGet(type) { vSet = null; const st = await vSend([0x01, type]); return st === 0 ? vSet : null; }
 function vSend(bytes) {
   return new Promise((res) => {
     const to = setTimeout(() => { vResp = null; res(-1); }, 4000);
@@ -1102,7 +1112,8 @@ async function vAttach() {
   vCp.removeEventListener("characteristicvaluechanged", onVCp); vCp.addEventListener("characteristicvaluechanged", onVCp);
   vData.removeEventListener("characteristicvaluechanged", onVData); vData.addEventListener("characteristicvaluechanged", onVData);
   await vCp.startNotifications(); await vData.startNotifications();
-  vRateNom = vPlace === "Fuß" ? +$("vrate").value : 52;
+  vRateNom = 52;
+  if (vPlace === "Fuß") { const want = +$("vrate").value, st0 = await vGet(2); if (st0 && st0[0]) { addEntry({ typ: "Sense", name: `Sense kann Beschleunigung mit ${st0[0].join(", ")} Hz` + (st0[2] ? `, Bereich ${st0[2].join(", ")} g` : ""), start: Date.now(), session: vRec }); const ok = st0[0].filter(r => r <= want); vRateNom = ok.length ? Math.max(...ok) : 52; } else vRateNom = want; }
   let full = [0x02, 0x02, 0x00, 0x01, vRateNom & 255, vRateNom >> 8, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03];
   let st = await vSend(full);
   if (st !== 0 && vRateNom !== 52) { addEntry({ typ: "Sense", name: `Rate ${vRateNom} Hz abgelehnt (Code ${st}), nehme 52 Hz`, start: Date.now(), session: vRec }); vRateNom = 52; full = [0x02, 0x02, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03]; await vSend([0x03, 0x02]); await wait(300); st = await vSend(full); }
@@ -1111,9 +1122,12 @@ async function vAttach() {
   if (st !== 0) throw new Error("Start abgelehnt, Code " + st);
   addEntry({ typ: "Sense", name: "Beschleunigung gestartet, Trageort " + vPlace + ", " + vRateNom + " Hz", start: Date.now(), session: vRec });
   if (vPlace === "Fuß" && $("usegyro").checked) {
-    let ok = null, last = null;
-    for (const r of [2000, 1000, 500, 250]) {
-      const cmd = [0x02, 0x05, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, r & 255, r >> 8, 0x04, 0x01, 0x03];
+    let ok = null, last = null; const gs = await vGet(5);
+    if (gs) addEntry({ typ: "Sense", name: `Sense kann Drehrate mit ${(gs[0] || []).join(", ")} Hz, Bereich ${(gs[2] || []).join(", ")} °/s`, start: Date.now(), session: vRec });
+    const gRate = gs && gs[0] && gs[0].length ? (gs[0].includes(52) ? 52 : Math.min(...gs[0])) : 52, gRanges = gs && gs[2] && gs[2].length ? [...gs[2]].sort((a, b) => b - a) : [2000, 1000, 500, 250];
+    await vSend([0x03, 0x05]);
+    for (const r of gRanges) {
+      const cmd = [0x02, 0x05, 0x00, 0x01, gRate & 255, gRate >> 8, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, r & 255, r >> 8, 0x04, 0x01, 0x03];
       vGFactor = null;
       let g = await vSend(cmd);
       if (g === 6) { await vSend([0x03, 0x05]); await wait(300); g = await vSend(cmd); }
@@ -1465,29 +1479,67 @@ try { speechSynthesis.getVoices(); speechSynthesis.onvoiceschanged = () => speec
 /* Herzschläge im Speicher für die Schätzung der Atemdauer */
 const memBeats = [];
 function memBeat(t, rr) { memBeats.push([t, rr]); if (memBeats.length > 20000) memBeats.splice(0, 5000); }
+/* Brustbeschleunigung der letzten 25 Minuten im Speicher, für die Atemzüge */
+const memAcc = { t: [], x: [], y: [], z: [] };
+function memAccPush(now, vals, dt) {
+  const n = vals.length / 3;
+  for (let i = 0; i < n; i++) { memAcc.t.push(now - (n - 1 - i) * dt); memAcc.x.push(vals[3 * i]); memAcc.y.push(vals[3 * i + 1]); memAcc.z.push(vals[3 * i + 2]); }
+  if (memAcc.t.length > 120000) { const k = memAcc.t.length - 90000; for (const key of ["t", "x", "y", "z"]) memAcc[key].splice(0, k); }
+}
+/* Atemdauer als Median der erkannten Atemzüge im Zeitraum: zuerst sichere aus der Brust, sonst aus der Atemwelle im Puls */
+function estBreathCycles(fromT, toT) {
+  const raw = memBeats.filter(x => x[0] >= fromT && x[0] <= toT && x[1] > 300 && x[1] < 2000);
+  const b = raw.filter((x, i) => { const w = raw.slice(Math.max(0, i - 5), i + 6).map(y => y[1]).sort((p, q) => p - q); const m = w[w.length >> 1]; return Math.abs(x[1] - m) < 0.2 * m; });
+  const bp = b.length > 60 ? breathsPulse(Float64Array.from(b, x => x[0]), Float32Array.from(b, x => 60000 / x[1])) : [];
+  const lo = lowerBound(memAcc.t, fromT), hi = lowerBound(memAcc.t, toT);
+  let chest = [];
+  if (hi - lo > 1500) {
+    const A = { t: Float64Array.from(memAcc.t.slice(lo, hi)), c: [Float32Array.from(memAcc.x.slice(lo, hi)), Float32Array.from(memAcc.y.slice(lo, hi)), Float32Array.from(memAcc.z.slice(lo, hi))] };
+    const bc = breathsChest(A);
+    bc.list.forEach(c => { if (!c.sicher || !c.aufrecht) return; const near = bp.filter(p => Math.abs(p.t - c.t) < 60000 && p.tiefe >= 6).map(p => p.dauer).sort((x, y) => x - y);
+      if (near.length >= 3) { const md = near[near.length >> 1]; if (Math.abs(c.dauer - md) > 0.4 * md) c.sicher = false; } });
+    chest = bc.list.filter(c => c.sicher);
+  }
+  const med = a => { const s = a.map(c => c.dauer).sort((x, y) => x - y); return s[s.length >> 1]; };
+  if (chest.length >= 10) return { ms: Math.round(med(chest) * 1000), n: chest.length, quelle: "Brust" };
+  if (bp.length >= 10) return { ms: Math.round(med(bp) * 1000), n: bp.length, quelle: "Puls" };
+  return null;
+}
 function estBreath(fromT, toT) {
-  const b = memBeats.filter(x => x[0] >= fromT && x[0] <= toT && x[1] > 300 && x[1] < 2000);
+  /* Herzschläge bereinigen: Abweichung über 20 Prozent vom Median der Nachbarn verwerfen */
+  const raw = memBeats.filter(x => x[0] >= fromT && x[0] <= toT && x[1] > 300 && x[1] < 2000);
+  const b = raw.filter((x, i) => { const w = raw.slice(Math.max(0, i - 5), i + 6).map(y => y[1]).sort((p, q) => p - q); const m = w[w.length >> 1]; return Math.abs(x[1] - m) < 0.2 * m; });
   if (b.length < 60) return null;
   const t0 = b[0][0], n = Math.floor((b[b.length - 1][0] - t0) / 250); if (n < 240) return null;
-  const hr = new Float32Array(n); let j = 0;
-  for (let i = 0; i < n; i++) { const t = t0 + i * 250; while (j < b.length - 2 && b[j + 1][0] < t) j++; const a = b[j], c = b[j + 1], f = (t - a[0]) / ((c[0] - a[0]) || 1); hr[i] = 60000 / a[1] * (1 - f) + 60000 / c[1] * f; }
-  const sl = movMean(hr, 120), x = Float32Array.from(hr, (v, i) => v - sl[i]);
-  let v0 = 0; for (let i = 0; i < n; i++) v0 += x[i] * x[i]; if (!v0) return null;
-  const r = new Float32Array(82);
-  for (let L = 6; L <= 81; L++) { let s = 0; for (let i = 0; i + L < n; i++) s += x[i] * x[i + L]; r[L] = s / v0; }
-  let mx = 0; for (let L = 8; L <= 80; L++) mx = Math.max(mx, r[L]);
-  if (mx < 0.15) return null;
-  for (let L = 8; L <= 80; L++) if (r[L] >= 0.7 * mx && r[L] >= r[L - 1] && r[L] >= r[L + 1]) return { ms: L * 250, r: mx };
-  return null;
+  const rr = new Float32Array(n); let j = 0;
+  for (let i = 0; i < n; i++) { const t = t0 + i * 250; while (j < b.length - 2 && b[j + 1][0] < t) j++; const a = b[j], c = b[j + 1], f = (t - a[0]) / ((c[0] - a[0]) || 1); rr[i] = a[1] * (1 - f) + c[1] * f; }
+  const sl = movMean(rr, 120), x = Float32Array.from(rr, (v, i) => v - sl[i]);
+  /* gemitteltes Spektrum (Welch): Abschnitte von 120 s, halb überlappend, Hann-Fenster */
+  const N = Math.min(480, n), P = new Float64Array(N >> 1); let cnt = 0;
+  for (let a = 0; a + N <= n; a += N >> 1) {
+    for (let k = 1; k < (N >> 1); k++) { let re = 0, im = 0; for (let i = 0; i < N; i++) { const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)), v = x[a + i] * w, ph = 2 * Math.PI * k * i / N; re += v * Math.cos(ph); im -= v * Math.sin(ph); } P[k] += re * re + im * im; }
+    cnt++;
+  }
+  if (!cnt) return null;
+  const df = 4 / N; let tot = 0, bk = 0, bv = -1;
+  for (let k = 1; k < (N >> 1); k++) { const f = k * df; if (f < 0.05 || f > 0.4) continue; tot += P[k]; if (P[k] > bv) { bv = P[k]; bk = k; } }
+  if (!tot || !bk) return null;
+  let band = 0; for (let k = bk - 2; k <= bk + 2; k++) if (k > 0 && k < (N >> 1)) band += P[k];
+  /* Feinlage der Spitze über die Parabel durch die Nachbarn */
+  const y0 = P[bk - 1] || 0, y1 = P[bk], y2 = P[bk + 1] || 0, den = y0 - 2 * y1 + y2, d = den < 0 ? 0.5 * (y0 - y2) / den : 0;
+  const f = (bk + d) * df, q = band / tot;
+  return q >= 0.12 ? { ms: Math.round(1000 / f), r: q } : null;
 }
 function atemTimes(fromT, toT) {
   const T = bTimes(); if (!T) return null;
   if ($("bmode").value !== "angepasst") return T;
-  const e = estBreath(fromT, toT);
-  if (!e) { addEntry({ typ: "Atemhilfe", name: "Atemdauer aus dem Puls nicht schätzbar, feste Zeiten", start: Date.now() }); return T; }
+  let e = estBreathCycles(fromT, toT), how = "";
+  if (e) how = `Median aus ${e.n} Atemzügen (${e.quelle})`;
+  else { const s = estBreath(fromT, toT); if (s) { e = s; how = `Spektrum des Pulses (Anteil der Spitze ${Math.round(s.r * 100)} %)`; } }
+  if (!e) { addEntry({ typ: "Atemhilfe", name: "Atemdauer nicht schätzbar, feste Zeiten", start: Date.now() }); return T; }
   const k = e.ms / T.reduce((a, c) => a + c, 0);
   const N = T.map((v, i) => { const x = Math.round(v * k / 100) * 100; return (i === 0 || i === 2) ? Math.max(500, x) : x; });
-  addEntry({ typ: "Atemhilfe", name: `Angepasst: geschätzte Atemdauer ${num(e.ms / 1000)} s aus dem Puls (Güte ${num(e.r, 2)}), Zeiten ${N.map(v => num(v / 1000)).join(" / ")} s`, start: Date.now() });
+  addEntry({ typ: "Atemhilfe", name: `Angepasst: Atemdauer ${num(e.ms / 1000)} s, ${how}, Zeiten ${N.map(v => num(v / 1000)).join(" / ")} s`, start: Date.now() });
   return N;
 }
 function bStartWith(T) {
