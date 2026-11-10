@@ -1076,9 +1076,9 @@ function onVData(ev) {
 function onVCp(ev) {
   const v = ev.target.value;
   if (v.getUint8(0) !== 0xF0 || v.byteLength < 4) return;
-  if (v.getUint8(1) === 1 || v.getUint8(1) === 3) {
+  if (v.getUint8(1) === 1 || v.getUint8(1) === 3 || v.getUint8(1) === 4) {
     const status = v.getUint8(3);
-    if (v.getUint8(1) === 1 && status === 0) { vSet = {}; const size = { 0: 2, 1: 2, 2: 2, 3: 4, 4: 1, 5: 4 };
+    if ((v.getUint8(1) === 1 || v.getUint8(1) === 4) && status === 0) { vSet = {}; const size = { 0: 2, 1: 2, 2: 2, 3: 4, 4: 1, 5: 4 };
       for (let o = 5; o + 2 <= v.byteLength;) { const t = v.getUint8(o), c = v.getUint8(o + 1), w = size[t]; if (!w || o + 2 + c * w > v.byteLength) break;
         vSet[t] = []; for (let k = 0; k < c; k++) vSet[t].push(w === 1 ? v.getUint8(o + 2 + k) : w === 2 ? v.getUint16(o + 2 + 2 * k, true) : v.getFloat32(o + 2 + 4 * k, true)); o += 2 + c * w; } }
     if (vResp) { const r = vResp; vResp = null; r(status); }
@@ -1097,13 +1097,17 @@ function onVCp(ev) {
     if (vResp) { const r = vResp; vResp = null; r(status); }
   }
 }
-let vSet = null;
-async function vGet(type) { vSet = null; const st = await vSend([0x01, type]); return st === 0 ? vSet : null; }
-function vSend(bytes) {
+let vSet = null, vSdk = false;
+async function vGet(type) { vSet = null; const st = await vSend([vSdk ? 0x04 : 0x01, type]); return st === 0 ? vSet : null; }
+/* wartet auf Antwort und auf das Ende des Schreibens, damit der nächste Befehl nicht in ein laufendes Schreiben fällt; bei Belegt einmal neu */
+async function vSend(bytes) { let st = await vSend1(bytes); if (st === -2) { await wait(400); st = await vSend1(bytes); } return st; }
+function vSend1(bytes) {
   return new Promise((res) => {
-    const to = setTimeout(() => { vResp = null; res(-1); }, 4000);
-    vResp = st => { clearTimeout(to); res(st); };
-    vCp.writeValueWithResponse(new Uint8Array(bytes)).catch(() => { clearTimeout(to); vResp = null; res(-2); });
+    let got = null, wrote = false, done = false;
+    const fin = () => { if (!done && wrote && got !== null) { done = true; clearTimeout(to); res(got); } };
+    const to = setTimeout(() => { vResp = null; if (!done) { done = true; res(got ?? -1); } }, 4000);
+    vResp = st => { got = st; fin(); };
+    vCp.writeValueWithResponse(new Uint8Array(bytes)).then(() => { wrote = true; fin(); }).catch(() => { if (!done) { done = true; clearTimeout(to); vResp = null; res(-2); } });
   });
 }
 async function vAttach() {
@@ -1113,7 +1117,9 @@ async function vAttach() {
   vData.removeEventListener("characteristicvaluechanged", onVData); vData.addEventListener("characteristicvaluechanged", onVData);
   await vCp.startNotifications(); await vData.startNotifications();
   vRateNom = 52;
-  if (vPlace === "Fuß") { const want = +$("vrate").value, st0 = await vGet(2); if (st0 && st0[0]) { addEntry({ typ: "Sense", name: `Sense kann Beschleunigung mit ${st0[0].join(", ")} Hz` + (st0[2] ? `, Bereich ${st0[2].join(", ")} g` : ""), start: Date.now(), session: vRec }); const ok = st0[0].filter(r => r <= want); vRateNom = ok.length ? Math.max(...ok) : 52; } else vRateNom = want; }
+  if (vPlace === "Fuß") { const want = +$("vrate").value;
+    vSdk = false; if (want > 52) { const sd = await vSend([0x02, 0x09]); vSdk = sd === 0; addEntry({ typ: "Sense", name: vSdk ? "SDK-Modus an (für höhere Raten)" : "SDK-Modus nicht möglich, Code " + sd, start: Date.now(), session: vRec }); }
+    const st0 = await vGet(2); if (st0 && st0[0]) { addEntry({ typ: "Sense", name: `Sense kann Beschleunigung mit ${st0[0].join(", ")} Hz` + (st0[2] ? `, Bereich ${st0[2].join(", ")} g` : ""), start: Date.now(), session: vRec }); const ok = st0[0].filter(r => r <= want); vRateNom = ok.length ? Math.max(...ok) : 52; } else vRateNom = want; }
   let full = [0x02, 0x02, 0x00, 0x01, vRateNom & 255, vRateNom >> 8, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03];
   let st = await vSend(full);
   if (st !== 0 && vRateNom !== 52) { addEntry({ typ: "Sense", name: `Rate ${vRateNom} Hz abgelehnt (Code ${st}), nehme 52 Hz`, start: Date.now(), session: vRec }); vRateNom = 52; full = [0x02, 0x02, 0x00, 0x01, 0x34, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00, 0x04, 0x01, 0x03]; await vSend([0x03, 0x02]); await wait(300); st = await vSend(full); }
@@ -1181,7 +1187,7 @@ $("vconnect").addEventListener("click", async () => {
 });
 $("vstop").addEventListener("click", async () => {
   vWanted = false;
-  try { await vSend([0x03, 0x02]); if (vPlace === "Arm") await vSend([0x03, 0x01]); else await vSend([0x03, 0x05]); } catch (e) {}
+  try { await vSend([0x03, 0x02]); if (vPlace === "Arm") await vSend([0x03, 0x01]); else await vSend([0x03, 0x05]); if (vSdk) { await vSend([0x03, 0x09]); vSdk = false; } } catch (e) {}
   try { vDev?.gatt.disconnect(); } catch (e) {}
   addEntry({ typ: "Sense", name: `Aufzeichnung beendet, ${Math.round(vN)} Werte` + (vG ? `, ${Math.round(vG)} Drehraten` : ""), start: Date.now(), session: vRec });
   vStatus("Beendet. Bitte „Alles speichern“ tippen."); vRec = null;
