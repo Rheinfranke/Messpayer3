@@ -701,7 +701,8 @@ async function hrAttach() {
 $("hrconnect").addEventListener("click", async () => {
   if (!navigator.bluetooth) { hrStatus("Bluetooth ist in diesem Browser nicht verfügbar. Bitte Chrome verwenden und Bluetooth einschalten."); return; }
   try {
-    const dev = await navigator.bluetooth.requestDevice({ filters: [{ services: ["heart_rate"] }], optionalServices: [PMD_SVC] });
+    /* nur Brustgurte anbieten, damit nicht versehentlich der Sense als Gurt verbunden wird */
+    const dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "Polar H" }], optionalServices: ["heart_rate", PMD_SVC] });
     if (hrDev && hrDev !== dev) { try { hrDev.gatt.disconnect(); } catch (e) {} }
     hrDev = dev;
     if (hrDevListened !== dev) { hrDevListened = dev; dev.addEventListener("gattserverdisconnected", onGattLost); }
@@ -1756,23 +1757,28 @@ function rPeaks(E) {
 /* Herzschläge auf die R-Zacken legen: Versatz je 10 Minuten aus dem Histogramm der Abstände */
 function alignBeats(B, R) {
   if (!R.length) return { lag: null, ok: 0, out: B.map(b => ({ t: b.t, ok: false })) };
-  const CH = 600000, hist = new Map(), NB = 601;
+  /* Versatz der Herzschlag-Zeit zur R-Zacke je 5 Minuten: Histogramm der Abstände, gültig wenn die Spitze mindestens 30 Prozent der Schläge trägt */
+  const CH = 300000, hist = new Map(), cnt = new Map(), NB = 601;
   for (const b of B) {
-    const key = Math.floor(b.t / CH); let h = hist.get(key); if (!h) { h = new Int32Array(NB); hist.set(key, h); }
+    const key = Math.floor(b.t / CH); let h = hist.get(key); if (!h) { h = new Int32Array(NB); hist.set(key, h); cnt.set(key, 0); } cnt.set(key, cnt.get(key) + 1);
     for (let k = lowerBound(R, b.t - 5000), hi = lowerBound(R, b.t + 1000); k < hi; k++) { const d = Math.round((b.t - R[k]) / 10) + 100; if (d >= 0 && d < NB) h[d]++; }
   }
-  const glob = new Int32Array(NB); hist.forEach(h => { for (let i = 0; i < NB; i++) glob[i] += h[i]; });
   const mode = h => { let bi = 1, bv = -1; for (let i = 1; i < NB - 1; i++) { const v = h[i - 1] + h[i] + h[i + 1]; if (v > bv) { bv = v; bi = i; } } return { lag: (bi - 100) * 10, v: bv }; };
+  const glob = new Int32Array(NB); hist.forEach(h => { for (let i = 0; i < NB; i++) glob[i] += h[i]; });
   const g = mode(glob), lagOf = {}, used = [];
-  hist.forEach((h, key) => { const m = mode(h), tot = h.reduce((a, c) => a + c, 0); lagOf[key] = m.v > 0.15 * tot ? m.lag : g.lag; if (m.v > 0.15 * tot) used.push(m.lag); });
+  hist.forEach((h, key) => { const m = mode(h); if (m.v > 0.3 * cnt.get(key)) { lagOf[key] = m.lag; used.push(m.lag); } });
   used.sort((a, b) => a - b); if (used.length) g.lag = used[used.length >> 1];
+  const keys = Object.keys(lagOf).map(Number).sort((a, b) => a - b);
+  const nearLag = key => { if (lagOf[key] !== undefined) return [lagOf[key]]; const o = []; let best = null; keys.forEach(k => { if (best === null || Math.abs(k - key) < Math.abs(best - key)) best = k; }); if (best !== null) o.push(lagOf[best]); o.push(g.lag); return o; };
   let ok = 0;
   const out = B.map(b => {
-    const lag = lagOf[Math.floor(b.t / CH)] ?? g.lag, want = b.t - lag;
-    const k = lowerBound(R, want); let best = null;
-    for (const j of [k - 1, k]) if (j >= 0 && j < R.length && Math.abs(R[j] - want) < 120 && (best === null || Math.abs(R[j] - want) < Math.abs(best - want))) best = R[j];
-    if (best !== null) { ok++; return { t: best, ok: true }; }
-    return { t: want, ok: false };
+    const key = Math.floor(b.t / CH), cands = [...nearLag(key), lagOf[key - 1], lagOf[key + 1]].filter(x => x !== undefined);
+    for (const lag of cands) {
+      const want = b.t - lag, k = lowerBound(R, want); let best = null;
+      for (const j of [k - 1, k]) if (j >= 0 && j < R.length && Math.abs(R[j] - want) < 120 && (best === null || Math.abs(R[j] - want) < Math.abs(best - want))) best = R[j];
+      if (best !== null) { ok++; return { t: best, ok: true }; }
+    }
+    return { t: b.t - cands[0], ok: false };
   });
   return { lag: g.lag, ok, out };
 }
@@ -1805,19 +1811,37 @@ function tapGroups(X, w, floor) {
   }
   return g;
 }
-/* Versatz über die Ähnlichkeit der Klopfspuren: beide Beträge auf 2 ms gerastert, logarithmiert, Korrelation über plus minus 500 ms */
+/* Versatz über die Ähnlichkeit der Klopfspuren: beide Beträge auf 2 ms gerastert, logarithmiert, Korrelation über plus minus 500 ms, gültig ab 0,6 */
 function envAt(X, hp, t0, t1) { const n = Math.floor((t1 - t0) / 2), o = new Float32Array(n); let j = lowerBound(X.t, t0) - 1; if (j < 0) j = 0;
   for (let i = 0; i < n; i++) { const t = t0 + 2 * i; while (j < X.t.length - 2 && X.t[j + 1] < t) j++; const a = X.t[j], b = X.t[j + 1] ?? a, f = b > a ? Math.min(1, Math.max(0, (t - a) / (b - a))) : 0; o[i] = Math.log1p(hp[j] * (1 - f) + (hp[j + 1] ?? hp[j]) * f); } return o; }
 function corr(a, b) { const n = Math.min(a.length, b.length); let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n; let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; } return saa && sbb ? sab / Math.sqrt(saa * sbb) : 0; }
-function tapSync(A, F) {
+function tapSync(A, F, hints) {
   const gc = tapGroups(A, W(A, 0.3), 250), gf = tapGroups(F, W(F, 0.3), 1000), pairs = [];
   if (gc.length && F) {
     const ha = magHP(A, W(A, 0.3)), hf = magHP(F, W(F, 0.3));
     gc.forEach(c => {
       const t0 = c[0] - 300, t1 = c[c.length - 1] + 300, ce = envAt(A, ha, t0, t1); let best = { off: 0, r: -1 };
       for (let off = -500; off <= 500; off += 2) { const r = corr(ce, envAt(F, hf, t0 - off, t1 - off)); if (r > best.r) best = { off, r }; }
-      if (best.r > 0.4) pairs.push({ t: c[0], off: best.off, r: best.r, n: c.length, streu: null });
+      if (best.r > 0.6) pairs.push({ t: c[0], off: best.off, r: best.r, n: c.length, streu: null });
     });
+  }
+  /* Hinweise aus der Live-Erkennung: um jede gemeldete Klopfstelle mit größerem Suchbereich (plus minus 1,5 s) */
+  const live = [];
+  if (hints && hints.length && A && F) {
+    const ha = magHP(A, W(A, 0.3)), hf = magHP(F, W(F, 0.3));
+    hints.forEach(h => {
+      let best = { off: 0, r: -1 };
+      for (const [da, db] of [[-4000, 2500], [-1500, 2500], [-1000, 4000]]) {
+        const t0 = h + da, t1 = h + db, ce = envAt(A, ha, t0, t1); let b = { off: 0, r: -1 };
+        for (let off = -1500; off <= 1500; off += 4) { const r = corr(ce, envAt(F, hf, t0 - off, t1 - off)); if (r > b.r) b = { off, r }; }
+        for (let off = b.off - 4; off <= b.off + 4; off += 2) { const r = corr(ce, envAt(F, hf, t0 - off, t1 - off)); if (r > b.r) b = { off, r }; }
+        if (b.r > best.r) best = b;
+      }
+      if (best.r > 0.6) live.push({ t: h, off: best.off, r: best.r, n: "live", streu: null });
+    });
+    /* bewusstes Klopfen hat Vorrang: gibt es Treffer an den Live-Stellen, zählen nur diese */
+    if (live.length) { pairs.length = 0; pairs.push(...live); }
+    pairs.sort((a, b) => a.t - b.t);
   }
   let fn = () => 0, drift = null;
   if (pairs.length === 1) fn = () => pairs[0].off;
@@ -2080,7 +2104,8 @@ async function buildSpar(D, stamp8) {
   say2("Rechne: Klopfabgleich …"); await wait(20);
   /* Abgleich mit allen Sense-Daten, egal ob am Fuß oder am Arm getragen: es ist dieselbe Uhr */
   const SA = FA && FA.length ? expand(FA, offs, "f", 3, p => p.r === 52 ? 4.096 : 1) : F;
-  const sync = A && SA ? tapSync(A, SA) : { gc: [], gf: [], pairs: [], fn: () => 0, drift: null };
+  const hints = L.filter(r => r.typ === "Abgleich" && /erkannt/.test(r.name)).map(r => r.start);
+  const sync = A && SA ? tapSync(A, SA, hints) : { gc: [], gf: [], pairs: [], fn: () => 0, drift: null };
   if (sync.pairs.length) { if (F) for (let i = 0; i < F.t.length; i++) F.t[i] += sync.fn(F.t[i]); if (G) for (let i = 0; i < G.t.length; i++) G.t[i] += sync.fn(G.t[i]); }
   say2("Rechne: Herzschläge und EKG …"); await wait(20);
   const B = BT.map(b => ({ t: b[0], rr: b[1] })).sort((a, b) => a.t - b.t).filter((b, i, a) => !i || b.t - a[i - 1].t > 200);
@@ -2156,7 +2181,7 @@ async function buildSpar(D, stamp8) {
   const KR = [["Feld", "Wert"], ["Version", "Messplayer 8"], ["Datei", stamp8], ["Beginn", dstamp(new Date(T0)) + " " + tx(T0)], ["T0_Epoch_ms", Math.round(T0)],
     ["BigData", $("bigdata").checked ? "an" : "aus"], ["Herzschläge", B.length], ["davon im EKG bestätigt", R.length ? al.ok : "kein EKG"],
     ["Versatz Herzschlag-Zeit zu EKG ms", al.lag], ["Klopfgruppen Brust", sync.gc.length], ["Klopfgruppen Sense", sync.gf.length],
-    ["Abgleich Sense zu Brust ms", sync.pairs.length ? sync.pairs.map(p => `${tx(p.t)}: ${Math.round(p.off)} (${p.n} Klopfer, Ähnlichkeit ${Math.round(p.r * 100) / 100})`).join(" | ") : "kein Abgleich gefunden"],
+    ["Abgleich Sense zu Brust ms", sync.pairs.length ? sync.pairs.map(p => `${tx(p.t)}: ${Math.round(p.off)} (${p.n === "live" ? "Stelle aus der Live-Erkennung" : p.n + " Klopfer"}, Ähnlichkeit ${Math.round(p.r * 100) / 100})`).join(" | ") : "kein Abgleich gefunden"],
     ["Drift ms pro Stunde", sync.drift === null ? null : Math.round(sync.drift)], ["Sense-Zeiten korrigiert", sync.pairs.length ? "ja" : "nein"],
     ["Drehrate Fuß", gyInfo], ["Schritte rechts sicher", nR], ["Schritte links sicher", nL],
     ["Atemzüge Brust sicher", sure.length], ["Atemzüge aus Puls (Schätzung)", breaths.length - sure.length],
